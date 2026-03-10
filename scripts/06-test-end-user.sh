@@ -106,14 +106,11 @@ echo ""
 # ── Step 1: Register test user via org-scoped endpoint ──
 echo -e "${BLUE}Step 1: Register test user via hosted login API${NC}"
 
+REG_PAYLOAD="$(jq -n --arg e "$TEST_EMAIL" --arg p "$TEST_PASS" --arg n "$TEST_NAME" '{email:$e, password:$p, name:$n}')"
 REG_RESPONSE="$(curl -s -w "\nHTTP_CODE:%{http_code}" \
   -X POST "$AUTH_SERVICE_URL/organizations/$EU_ORG_SLUG/auth/register" \
   -H "Content-Type: application/json" \
-  -d "{
-    \"email\": \"$TEST_EMAIL\",
-    \"password\": \"$TEST_PASS\",
-    \"name\": \"$TEST_NAME\"
-  }")"
+  -d "$REG_PAYLOAD")"
 
 HTTP_CODE="$(echo "$REG_RESPONSE" | grep "HTTP_CODE" | cut -d: -f2)"
 REG_BODY="$(echo "$REG_RESPONSE" | grep -v "HTTP_CODE")"

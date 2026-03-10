@@ -89,12 +89,8 @@ echo "Permissions source: $PERMISSIONS_FILE"
 mkdir -p "$SETUP_DIR/credentials"
 
 CREDS_FILE="$SETUP_DIR/credentials/${SERVICE_ID}${ENV_SUFFIX}.json"
-LEGACY_CREDS_FILE="$SETUP_DIR/credentials/integration-service${ENV_SUFFIX}.json"
 SOURCE_CREDS_FILE="$CREDS_FILE"
 
-if [ "$SERVICE_ID" = "integration" ] && [ ! -f "$CREDS_FILE" ] && [ -f "$LEGACY_CREDS_FILE" ]; then
-  SOURCE_CREDS_FILE="$LEGACY_CREDS_FILE"
-fi
 # Fallback: try without suffix if env-specific file doesn't exist
 if [ ! -f "$SOURCE_CREDS_FILE" ] && [ -n "$ENV_SUFFIX" ]; then
   FALLBACK="$SETUP_DIR/credentials/${SERVICE_ID}.json"
@@ -128,13 +124,10 @@ if [ -z "$ADMIN_PASSWORD" ]; then
 fi
 
 echo -e "${BLUE}Step 1: Setting up admin account${NC}"
+REGISTER_PAYLOAD="$(jq -n --arg e "$ADMIN_EMAIL" --arg p "$ADMIN_PASSWORD" --arg n "$SERVICE_NAME Admin" '{email:$e, password:$p, name:$n}')"
 REGISTER_RESPONSE="$(curl -s -X POST "$AUTH_SERVICE_URL/auth/register" \
   -H "Content-Type: application/json" \
-  -d '{
-    "email": "'"$ADMIN_EMAIL"'",
-    "password": "'"$ADMIN_PASSWORD"'",
-    "name": "'"$SERVICE_NAME"' Admin"
-  }' 2>&1)"
+  -d "$REGISTER_PAYLOAD" 2>&1)"
 
 if echo "$REGISTER_RESPONSE" | grep -q "access_token"; then
   ACCESS_TOKEN="$(echo "$REGISTER_RESPONSE" | jq -r '.access_token')"
@@ -143,9 +136,10 @@ if echo "$REGISTER_RESPONSE" | grep -q "access_token"; then
   echo -e "${GREEN}✓ Admin account created${NC}"
 else
   echo -e "${YELLOW}⚠ Admin exists or registration failed, attempting login...${NC}"
+  LOGIN_PAYLOAD="$(jq -n --arg e "$ADMIN_EMAIL" --arg p "$ADMIN_PASSWORD" '{email:$e, password:$p}')"
   LOGIN_RESPONSE="$(curl -s -X POST "$AUTH_SERVICE_URL/auth/login" \
     -H "Content-Type: application/json" \
-    -d "{\"email\": \"$ADMIN_EMAIL\", \"password\": \"$ADMIN_PASSWORD\"}" 2>&1)"
+    -d "$LOGIN_PAYLOAD" 2>&1)"
 
   if ! echo "$LOGIN_RESPONSE" | grep -q "access_token"; then
     echo -e "${RED}✗ Admin login failed${NC}"
@@ -166,9 +160,21 @@ fi
 
 echo -e "${BLUE}Step 2: Finding/creating service organization${NC}"
 if [ -n "$EXISTING_ORG_ID" ] && [ "$EXISTING_ORG_ID" != "null" ]; then
-  ORG_ID="$EXISTING_ORG_ID"
-  echo -e "${GREEN}✓ Using existing organization: $ORG_ID${NC}"
-else
+  # Verify the cached org still exists on the server
+  ORG_CHECK="$(curl -s -o /dev/null -w "%{http_code}" \
+    "$AUTH_SERVICE_URL/organizations/$EXISTING_ORG_ID" \
+    -H "Authorization: Bearer $ACCESS_TOKEN")"
+  if [ "$ORG_CHECK" = "200" ]; then
+    ORG_ID="$EXISTING_ORG_ID"
+    echo -e "${GREEN}✓ Using existing organization: $ORG_ID${NC}"
+  else
+    echo -e "${YELLOW}⚠ Cached org $EXISTING_ORG_ID not found (HTTP $ORG_CHECK), creating new one${NC}"
+    EXISTING_ORG_ID=""
+    EXISTING_API_KEY=""
+  fi
+fi
+
+if [ -z "${ORG_ID:-}" ]; then
   # Ticket:20260309_service_audience_token_fix Task 6
   # Include service_audience as top-level field (stored on org record for token audience resolution)
   CREATE_ORG_RESPONSE="$(curl -s -X POST "$AUTH_SERVICE_URL/organizations/" \
@@ -211,15 +217,31 @@ else
 fi
 
 echo -e "${BLUE}Step 3: Logging in with organization context${NC}"
+ORG_LOGIN_PAYLOAD="$(jq -n --arg e "$ADMIN_EMAIL" --arg p "$ADMIN_PASSWORD" --arg o "$ORG_ID" '{email:$e, password:$p, org_id:$o}')"
 ORG_LOGIN="$(curl -s -X POST "$AUTH_SERVICE_URL/auth/login" \
   -H "Content-Type: application/json" \
-  -d "{\"email\": \"$ADMIN_EMAIL\", \"password\": \"$ADMIN_PASSWORD\", \"org_id\": \"$ORG_ID\"}")"
+  -d "$ORG_LOGIN_PAYLOAD")"
 ORG_TOKEN="$(echo "$ORG_LOGIN" | jq -r '.access_token // empty')"
 
 if [ -z "$ORG_TOKEN" ]; then
-  echo -e "${RED}✗ Failed org-context login${NC}"
-  echo "Response: $ORG_LOGIN"
-  exit 1
+  echo -e "${YELLOW}⚠ Org login failed, attempting org-scoped register to join org...${NC}"
+  # Resolve org slug for org-scoped register
+  ORG_SLUG="$(curl -s -X GET "$AUTH_SERVICE_URL/organizations/$ORG_ID" \
+    -H "Authorization: Bearer $ACCESS_TOKEN" | jq -r '.slug // empty')"
+  if [ -n "$ORG_SLUG" ]; then
+    JOIN_PAYLOAD="$(jq -n --arg e "$ADMIN_EMAIL" --arg p "$ADMIN_PASSWORD" --arg n "$SERVICE_NAME Admin" '{email:$e, password:$p, name:$n}')"
+    JOIN_RESP="$(curl -s -X POST "$AUTH_SERVICE_URL/organizations/$ORG_SLUG/auth/register" \
+      -H "Content-Type: application/json" \
+      -d "$JOIN_PAYLOAD")"
+    ORG_TOKEN="$(echo "$JOIN_RESP" | jq -r '.access_token // empty')"
+  fi
+
+  if [ -z "$ORG_TOKEN" ]; then
+    echo -e "${RED}✗ Failed org-context login and join${NC}"
+    echo "Response: $ORG_LOGIN"
+    exit 1
+  fi
+  echo -e "${GREEN}✓ Joined organization and got token${NC}"
 fi
 
 echo -e "${GREEN}✓ Logged in with organization context${NC}"
@@ -335,11 +357,6 @@ cat > "$CREDS_FILE" <<JSON
 JSON
 
 echo -e "${GREEN}✓ Credentials saved: $CREDS_FILE${NC}"
-
-if [ "$SERVICE_ID" = "integration" ] && [ "$CREDS_FILE" != "$LEGACY_CREDS_FILE" ] && [ ! -f "$LEGACY_CREDS_FILE" ]; then
-  cp "$CREDS_FILE" "$LEGACY_CREDS_FILE"
-  echo -e "${YELLOW}Wrote compatibility credentials copy: $LEGACY_CREDS_FILE${NC}"
-fi
 
 if [ "$REGISTER_PROXY" = "1" ]; then
   echo -e "${BLUE}Step 6: Proxy registration${NC}"
