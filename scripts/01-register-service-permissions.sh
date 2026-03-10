@@ -1,0 +1,378 @@
+#!/bin/bash
+# Canonical service registration for Auth Mesh clients.
+# Reads config/permissions.json (schema v2) and performs idempotent registration.
+#
+# Run from setup/ directory:  ./scripts/01-register-service-permissions.sh
+# Or set SETUP_DIR:           SETUP_DIR=/path/to/setup ./scripts/01-register-service-permissions.sh
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SETUP_DIR="${SETUP_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
+PERMISSIONS_FILE="${PERMISSIONS_FILE:-$SETUP_DIR/config/permissions.json}"
+AUTH_SERVICE_URL="${AUTH_SERVICE_URL:-https://auth.service.ab0t.com}"
+SERVICE_PORT="${SERVICE_PORT:-8009}"
+REGISTER_PROXY="${REGISTER_PROXY:-0}"
+DRY_RUN="${DRY_RUN:-0}"
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "ERROR: jq is required"
+  exit 1
+fi
+
+if ! command -v curl >/dev/null 2>&1; then
+  echo "ERROR: curl is required"
+  exit 1
+fi
+
+if [ ! -f "$PERMISSIONS_FILE" ]; then
+  echo "ERROR: .permissions.json not found at $PERMISSIONS_FILE"
+  exit 1
+fi
+
+SERVICE_ID="$(jq -r '.service.id' "$PERMISSIONS_FILE")"
+SERVICE_NAME="$(jq -r '.service.name' "$PERMISSIONS_FILE")"
+SERVICE_DESC="$(jq -r '.service.description' "$PERMISSIONS_FILE")"
+SERVICE_AUDIENCE="$(jq -r '.service.audience' "$PERMISSIONS_FILE")"
+REG_SERVICE="$(jq -r '.registration.service // .service.id' "$PERMISSIONS_FILE")"
+REG_ACTIONS="$(jq -c '.registration.actions // []' "$PERMISSIONS_FILE")"
+REG_RESOURCES="$(jq -c '.registration.resources // []' "$PERMISSIONS_FILE")"
+
+if [ -z "$SERVICE_ID" ] || [ "$SERVICE_ID" = "null" ]; then
+  echo "ERROR: service.id missing in $PERMISSIONS_FILE"
+  exit 1
+fi
+
+if [ -z "$REG_SERVICE" ] || [ "$REG_SERVICE" = "null" ]; then
+  echo "ERROR: registration.service missing in $PERMISSIONS_FILE"
+  exit 1
+fi
+
+if [ "$DRY_RUN" = "1" ]; then
+  echo "=== DRY RUN: Registration payload preview ==="
+  echo "Service ID: $SERVICE_ID"
+  echo "Service Name: $SERVICE_NAME"
+  echo "Service Audience: $SERVICE_AUDIENCE"
+  echo "Permissions file: $PERMISSIONS_FILE"
+  echo "Auth Service URL: $AUTH_SERVICE_URL"
+  jq -n \
+    --arg service "$REG_SERVICE" \
+    --arg description "$SERVICE_NAME" \
+    --argjson actions "$REG_ACTIONS" \
+    --argjson resources "$REG_RESOURCES" \
+    '{service: $service, description: $description, actions: $actions, resources: $resources}'
+  echo "=== DRY RUN COMPLETE ==="
+  exit 0
+fi
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+MAGENTA='\033[0;35m'
+CYAN='\033[0;36m'
+NC='\033[0m'
+
+# Determine environment suffix from auth service URL
+if echo "$AUTH_SERVICE_URL" | grep -qE "localhost|dev\.ab0t\.com"; then
+  ENV_SUFFIX="-dev"
+else
+  ENV_SUFFIX=""
+fi
+
+echo -e "${MAGENTA}=== $SERVICE_NAME Registration ===${NC}"
+echo "Service ID: $SERVICE_ID"
+echo "Environment: ${ENV_SUFFIX:-production}"
+echo "Permissions source: $PERMISSIONS_FILE"
+
+mkdir -p "$SETUP_DIR/credentials"
+
+CREDS_FILE="$SETUP_DIR/credentials/${SERVICE_ID}${ENV_SUFFIX}.json"
+LEGACY_CREDS_FILE="$SETUP_DIR/credentials/integration-service${ENV_SUFFIX}.json"
+SOURCE_CREDS_FILE="$CREDS_FILE"
+
+if [ "$SERVICE_ID" = "integration" ] && [ ! -f "$CREDS_FILE" ] && [ -f "$LEGACY_CREDS_FILE" ]; then
+  SOURCE_CREDS_FILE="$LEGACY_CREDS_FILE"
+fi
+# Fallback: try without suffix if env-specific file doesn't exist
+if [ ! -f "$SOURCE_CREDS_FILE" ] && [ -n "$ENV_SUFFIX" ]; then
+  FALLBACK="$SETUP_DIR/credentials/${SERVICE_ID}.json"
+  if [ -f "$FALLBACK" ]; then
+    echo -e "${YELLOW}No ${SERVICE_ID}${ENV_SUFFIX}.json found, using ${SERVICE_ID}.json as seed${NC}"
+    SOURCE_CREDS_FILE="$FALLBACK"
+  fi
+fi
+
+ADMIN_EMAIL=""
+ADMIN_PASSWORD=""
+EXISTING_ORG_ID=""
+EXISTING_API_KEY=""
+EXISTING_USER_ID=""
+
+if [ -f "$SOURCE_CREDS_FILE" ]; then
+  echo -e "${CYAN}Found existing credentials at $SOURCE_CREDS_FILE${NC}"
+  ADMIN_EMAIL="$(jq -r '.admin.email // empty' "$SOURCE_CREDS_FILE")"
+  ADMIN_PASSWORD="$(jq -r '.admin.password // empty' "$SOURCE_CREDS_FILE")"
+  EXISTING_ORG_ID="$(jq -r '.organization.id // empty' "$SOURCE_CREDS_FILE")"
+  EXISTING_API_KEY="$(jq -r '.api_key.key // empty' "$SOURCE_CREDS_FILE")"
+  EXISTING_USER_ID="$(jq -r '.admin.user_id // empty' "$SOURCE_CREDS_FILE")"
+fi
+
+if [ -z "$ADMIN_EMAIL" ]; then
+  ADMIN_EMAIL="mike+${SERVICE_ID}@ab0t.com"
+fi
+if [ -z "$ADMIN_PASSWORD" ]; then
+  SERVICE_NAME_NO_SPACES="$(echo "$SERVICE_NAME" | tr -d ' ')"
+  ADMIN_PASSWORD="${SERVICE_NAME_NO_SPACES}Admin2024!Secure"
+fi
+
+echo -e "${BLUE}Step 1: Setting up admin account${NC}"
+REGISTER_RESPONSE="$(curl -s -X POST "$AUTH_SERVICE_URL/auth/register" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "email": "'"$ADMIN_EMAIL"'",
+    "password": "'"$ADMIN_PASSWORD"'",
+    "name": "'"$SERVICE_NAME"' Admin"
+  }' 2>&1)"
+
+if echo "$REGISTER_RESPONSE" | grep -q "access_token"; then
+  ACCESS_TOKEN="$(echo "$REGISTER_RESPONSE" | jq -r '.access_token')"
+  REFRESH_TOKEN="$(echo "$REGISTER_RESPONSE" | jq -r '.refresh_token')"
+  USER_ID="$(echo "$REGISTER_RESPONSE" | jq -r '.user.id // .user_info.id // .user_id // empty')"
+  echo -e "${GREEN}✓ Admin account created${NC}"
+else
+  echo -e "${YELLOW}⚠ Admin exists or registration failed, attempting login...${NC}"
+  LOGIN_RESPONSE="$(curl -s -X POST "$AUTH_SERVICE_URL/auth/login" \
+    -H "Content-Type: application/json" \
+    -d "{\"email\": \"$ADMIN_EMAIL\", \"password\": \"$ADMIN_PASSWORD\"}" 2>&1)"
+
+  if ! echo "$LOGIN_RESPONSE" | grep -q "access_token"; then
+    echo -e "${RED}✗ Admin login failed${NC}"
+    echo "Register response: $REGISTER_RESPONSE"
+    echo "Login response: $LOGIN_RESPONSE"
+    exit 1
+  fi
+
+  ACCESS_TOKEN="$(echo "$LOGIN_RESPONSE" | jq -r '.access_token')"
+  REFRESH_TOKEN="$(echo "$LOGIN_RESPONSE" | jq -r '.refresh_token')"
+  USER_ID="$(echo "$LOGIN_RESPONSE" | jq -r '.user.id // .user_info.id // .user_id // empty')"
+  echo -e "${GREEN}✓ Admin login successful${NC}"
+fi
+
+if [ -z "$USER_ID" ] && [ -n "$EXISTING_USER_ID" ]; then
+  USER_ID="$EXISTING_USER_ID"
+fi
+
+echo -e "${BLUE}Step 2: Finding/creating service organization${NC}"
+if [ -n "$EXISTING_ORG_ID" ] && [ "$EXISTING_ORG_ID" != "null" ]; then
+  ORG_ID="$EXISTING_ORG_ID"
+  echo -e "${GREEN}✓ Using existing organization: $ORG_ID${NC}"
+else
+  # Ticket:20260309_service_audience_token_fix Task 6
+  # Include service_audience as top-level field (stored on org record for token audience resolution)
+  CREATE_ORG_RESPONSE="$(curl -s -X POST "$AUTH_SERVICE_URL/organizations/" \
+    -H "Authorization: Bearer $ACCESS_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "name": "'"$SERVICE_NAME"'",
+      "slug": "'"$SERVICE_ID"'",
+      "domain": "'"$SERVICE_ID"'.service.ab0t.com",
+      "service_audience": "'"$SERVICE_AUDIENCE"'",
+      "billing_type": "enterprise",
+      "settings": {
+        "type": "platform_service",
+        "service": "'"$SERVICE_ID"'",
+        "hierarchical": false,
+        "internal_service": false
+      },
+      "metadata": {
+        "description": "'"$SERVICE_DESC"'",
+        "service_type": "service",
+        "data_classification": "sensitive"
+      }
+    }' 2>&1)"
+
+  if echo "$CREATE_ORG_RESPONSE" | grep -q '"id"'; then
+    ORG_ID="$(echo "$CREATE_ORG_RESPONSE" | jq -r '.id')"
+    echo -e "${GREEN}✓ Organization created: $ORG_ID${NC}"
+  else
+    USER_ORGS="$(curl -s -X GET "$AUTH_SERVICE_URL/users/me/organizations" \
+      -H "Authorization: Bearer $ACCESS_TOKEN")"
+    ORG_ID="$(echo "$USER_ORGS" | jq -r '.[] | select(.slug=="'"$SERVICE_ID"'" or .name=="'"$SERVICE_NAME"'") | .id' | head -n1)"
+
+    if [ -z "$ORG_ID" ] || [ "$ORG_ID" = "null" ]; then
+      echo -e "${RED}✗ Could not find existing organization${NC}"
+      echo "Create response: $CREATE_ORG_RESPONSE"
+      exit 1
+    fi
+    echo -e "${GREEN}✓ Using existing organization: $ORG_ID${NC}"
+  fi
+fi
+
+echo -e "${BLUE}Step 3: Logging in with organization context${NC}"
+ORG_LOGIN="$(curl -s -X POST "$AUTH_SERVICE_URL/auth/login" \
+  -H "Content-Type: application/json" \
+  -d "{\"email\": \"$ADMIN_EMAIL\", \"password\": \"$ADMIN_PASSWORD\", \"org_id\": \"$ORG_ID\"}")"
+ORG_TOKEN="$(echo "$ORG_LOGIN" | jq -r '.access_token // empty')"
+
+if [ -z "$ORG_TOKEN" ]; then
+  echo -e "${RED}✗ Failed org-context login${NC}"
+  echo "Response: $ORG_LOGIN"
+  exit 1
+fi
+
+echo -e "${GREEN}✓ Logged in with organization context${NC}"
+
+echo -e "${BLUE}Step 4: Registering permissions from .permissions.json${NC}"
+PERM_RESPONSE="$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST "$AUTH_SERVICE_URL/permissions/registry/register" \
+  -H "Authorization: Bearer $ORG_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "service": "'"$REG_SERVICE"'",
+    "description": "'"$SERVICE_NAME"'",
+    "actions": '"$REG_ACTIONS"',
+    "resources": '"$REG_RESOURCES"'
+  }')"
+
+HTTP_CODE="$(echo "$PERM_RESPONSE" | grep "HTTP_CODE" | cut -d: -f2)"
+RESPONSE_BODY="$(echo "$PERM_RESPONSE" | grep -v "HTTP_CODE")"
+
+if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
+  echo -e "${GREEN}✓ Permissions registry updated${NC}"
+else
+  echo -e "${YELLOW}⚠ Permissions registry response HTTP $HTTP_CODE${NC}"
+  echo "$RESPONSE_BODY"
+fi
+
+echo -e "${BLUE}Step 4b: Granting implied admin permissions to service admin${NC}"
+if [ -n "$USER_ID" ]; then
+  ADMIN_PERMS="$(jq -r '.permissions[] | select(.implies != null) | .id' "$PERMISSIONS_FILE")"
+  for ADMIN_PERM in $ADMIN_PERMS; do
+    curl -s -X POST "$AUTH_SERVICE_URL/permissions/grant?user_id=$USER_ID&org_id=$ORG_ID&permission=$ADMIN_PERM" \
+      -H "Authorization: Bearer $ORG_TOKEN" >/dev/null 2>&1 || true
+
+    IMPLIED_PERMS="$(jq -r --arg perm "$ADMIN_PERM" '.permissions[] | select(.id == $perm) | .implies[]?' "$PERMISSIONS_FILE")"
+    for IMPLIED in $IMPLIED_PERMS; do
+      curl -s -X POST "$AUTH_SERVICE_URL/permissions/grant?user_id=$USER_ID&org_id=$ORG_ID&permission=$IMPLIED" \
+        -H "Authorization: Bearer $ORG_TOKEN" >/dev/null 2>&1 || true
+    done
+  done
+  echo -e "${GREEN}✓ Implied admin permissions processed${NC}"
+else
+  echo -e "${YELLOW}⚠ user_id unavailable; skipped implied grants${NC}"
+fi
+
+echo -e "${BLUE}Step 5: Service API key${NC}"
+if [ -n "$EXISTING_API_KEY" ] && [ "$EXISTING_API_KEY" != "null" ]; then
+  API_KEY="$EXISTING_API_KEY"
+  API_KEY_ID="$(jq -r '.api_key.id // empty' "$SOURCE_CREDS_FILE")"
+  echo -e "${GREEN}✓ Reusing existing API key${NC}"
+else
+  ALL_PERMISSIONS="$(jq -r '[.permissions[].id] | map(gsub(":"; ".")) | .[]' "$PERMISSIONS_FILE" | jq -R . | jq -s .)"
+
+  API_KEY_RESPONSE="$(curl -s -X POST "$AUTH_SERVICE_URL/api-keys/" \
+    -H "Authorization: Bearer $ORG_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "name": "'"$SERVICE_ID"'-internal",
+      "permissions": '"$ALL_PERMISSIONS"',
+      "rate_limit": 100000,
+      "metadata": {
+        "purpose": "Internal '"$SERVICE_NAME"' operations",
+        "service_type": "'"$SERVICE_ID"'"
+      }
+    }' 2>&1)"
+
+  if echo "$API_KEY_RESPONSE" | grep -q '"key"'; then
+    API_KEY="$(echo "$API_KEY_RESPONSE" | jq -r '.key')"
+    API_KEY_ID="$(echo "$API_KEY_RESPONSE" | jq -r '.id')"
+    echo -e "${GREEN}✓ API key created${NC}"
+  else
+    echo -e "${YELLOW}⚠ Could not create API key${NC}"
+    echo "$API_KEY_RESPONSE"
+    API_KEY=""
+    API_KEY_ID=""
+  fi
+fi
+
+if [ -f "$CREDS_FILE" ]; then
+  BACKUP_FILE="$CREDS_FILE.bak.$(date +%Y%m%d_%H%M%S)"
+  cp "$CREDS_FILE" "$BACKUP_FILE"
+  echo -e "${CYAN}Backed up existing credentials: $BACKUP_FILE${NC}"
+fi
+
+# Ticket:20260309_service_audience_token_fix Task 6
+# Use service-name audience (RFC 9068 §3) instead of LOCAL:{org_id}
+AUTH_AUDIENCE="${SERVICE_AUDIENCE}"
+
+cat > "$CREDS_FILE" <<JSON
+{
+  "service": "$SERVICE_ID",
+  "service_audience": "$SERVICE_AUDIENCE",
+  "auth": {
+    "audience": "$AUTH_AUDIENCE"
+  },
+  "organization": {
+    "id": "$ORG_ID",
+    "name": "$SERVICE_NAME",
+    "slug": "$SERVICE_ID"
+  },
+  "admin": {
+    "email": "$ADMIN_EMAIL",
+    "password": "$ADMIN_PASSWORD",
+    "user_id": "$USER_ID",
+    "access_token": "$ORG_TOKEN",
+    "refresh_token": "$REFRESH_TOKEN"
+  },
+  "api_key": {
+    "id": "$API_KEY_ID",
+    "key": "$API_KEY"
+  },
+  "permissions_source": ".permissions.json",
+  "created_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+}
+JSON
+
+echo -e "${GREEN}✓ Credentials saved: $CREDS_FILE${NC}"
+
+if [ "$SERVICE_ID" = "integration" ] && [ "$CREDS_FILE" != "$LEGACY_CREDS_FILE" ] && [ ! -f "$LEGACY_CREDS_FILE" ]; then
+  cp "$CREDS_FILE" "$LEGACY_CREDS_FILE"
+  echo -e "${YELLOW}Wrote compatibility credentials copy: $LEGACY_CREDS_FILE${NC}"
+fi
+
+if [ "$REGISTER_PROXY" = "1" ]; then
+  echo -e "${BLUE}Step 6: Proxy registration${NC}"
+  PUBLIC_IP="$(curl -s http://checkip.amazonaws.com || true)"
+  if [ -z "$PUBLIC_IP" ]; then
+    PUBLIC_IP="127.0.0.1"
+  fi
+
+  PROXY_RESPONSE="$(curl -s -w "\n%{http_code}" -X POST "https://controller.proxy.ab0t.com/v1/service/services" \
+    -H "Content-Type: application/json" \
+    -d "{
+      \"service_id\": \"$SERVICE_ID\",
+      \"ip\": \"$PUBLIC_IP\",
+      \"port\": $SERVICE_PORT,
+      \"ttl_seconds\": 2592000,
+      \"description\": \"$SERVICE_DESC\",
+      \"weight\": 100,
+      \"create_only\": true
+    }")"
+
+  PROXY_HTTP="$(echo "$PROXY_RESPONSE" | tail -n1)"
+  if [ "$PROXY_HTTP" = "200" ] || [ "$PROXY_HTTP" = "201" ]; then
+    echo -e "${GREEN}✓ Proxy registration succeeded${NC}"
+  else
+    echo -e "${YELLOW}⚠ Proxy registration returned HTTP $PROXY_HTTP${NC}"
+  fi
+else
+  echo -e "${BLUE}Step 6: Proxy registration skipped (REGISTER_PROXY=0)${NC}"
+fi
+
+echo -e "${CYAN}=== Registration complete ===${NC}"
+echo "Service ID: $SERVICE_ID"
+echo "Organization ID: $ORG_ID"
+echo "Auth audience: $AUTH_AUDIENCE"
+echo "Service audience: $SERVICE_AUDIENCE"
+echo "Credentials: $CREDS_FILE"

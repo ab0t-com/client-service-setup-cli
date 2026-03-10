@@ -1,0 +1,12 @@
+# Gitleaks configuration for client-service-setup-cli
+# https://github.com/gitleaks/gitleaks
+
+title = "client-service-setup-cli gitleaks config"
+
+[allowlist]
+  description = "Known safe patterns"
+  paths = [
+    '''\.json\.example$''',
+    '''\.md$''',
+    '''INTENT\.txt$''',
+  ]

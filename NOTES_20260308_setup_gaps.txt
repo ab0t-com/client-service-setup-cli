@@ -1,0 +1,29 @@
+Setup CLI Gap Analysis — 2026-03-08
+=====================================
+
+1. [APPROVED] No end-to-end proof that a real user works
+   - Setup verifies infrastructure (endpoints, admin login, org hierarchy)
+   - Never tests the actual user story: stranger signs up and has permissions
+   - FIX: Add step 06 test-user script that registers, verifies team join,
+     checks permissions, reports PASS/FAIL
+
+2. No consolidated output for the developer
+   - Credentials spread across 4 JSON files (service, oauth, login, end-users)
+   - Developer manually extracts values into their .env or frontend config
+   - FIX: Generate a single .env or summary block with all values
+
+3. default_role confusion between config and runtime
+   - permissions.json says default_role: "integration-user" (the role concept)
+   - Script 04 overrides to "member" (needed for base auth perms: api.read etc)
+   - Both correct but contradictory if you read config then credential output
+   - FIX: Document why in README or inline in permissions.json
+
+4. No teardown/reset path
+   - Scripts are idempotent for creation but no reverse
+   - No ./setup reset or ./setup teardown
+   - FIX: Add teardown script (delete end-users org, revoke API key, etc)
+
+5. Login URL is buried in scrolling output
+   - The hosted login URL is the key deliverable for frontend developers
+   - Appears mid-output in step 04, easy to miss
+   - FIX: Add prominent final summary after all steps complete

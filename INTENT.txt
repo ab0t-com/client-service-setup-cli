@@ -1,0 +1,101 @@
+Auth Mesh Client Setup Kit
+==========================
+
+PURPOSE
+-------
+This is the canonical, self-contained setup package for any service ("client")
+that integrates with the Auth Mesh authentication platform.
+
+A new client copies this directory, edits three config files, runs the CLI,
+and has a fully working auth integration. Users can sign up, log in, and
+access the service. No custom code. No ongoing maintenance.
+
+
+AUDIENCE
+--------
+- Service teams building on Auth Mesh (external companies or internal teams)
+- DevOps engineers setting up new service deployments
+- Platform team maintaining the standard onboarding flow
+
+
+ARCHITECTURE: WHY IT WORKS
+---------------------------
+Auth Mesh uses Google Zanzibar (relation-based access control) under the hood.
+Permissions are NOT granted per-user. They flow through organizational
+hierarchy:
+
+    Service Org (platform_service)
+      └── End-Users Org (child, parent_id = service org)
+            ├── parent relationship → Zanzibar inheritance
+            ├── hosted login configured HERE
+            ├── default_role = "member"
+            ├── User A (member) → permissions inherited from org
+            └── User B (member) → permissions inherited from org
+
+When you create a child org with parent_id, the auth server writes:
+    organization:{child}#parent@org:{parent}
+
+This Zanzibar relationship means permission checks on the child org can walk
+up to the parent. Users who are members of the child org inherit the
+service's permissions through this chain.
+
+This is zero-config, zero-maintenance by design:
+  - No per-user permission grants
+  - No callbacks or webhooks to handle new signups
+  - No cron jobs to backfill permissions
+  - No service-side middleware to detect and fix missing permissions
+  - Membership in the org IS the permission grant
+
+Revoking access is equally simple — remove the user from the org.
+
+
+WHAT'S IN HERE
+--------------
+config/                         Input configuration (edit these)
+  permissions.json              Service permission schema
+  permissions.json.example      Schema reference with all fields
+  oauth-client.json             OAuth client config
+  oauth-client.json.example     Schema reference
+  hosted-login.json             Login page branding and registration rules
+  hosted-login.json.example     Schema reference
+
+scripts/                        Numbered, idempotent setup scripts
+  01-register-service-permissions.sh   Register service org + permissions + API key
+  02-register-oauth-client.sh          Register OAuth 2.1 client for frontend
+  03-setup-hosted-login.sh             Configure hosted login page
+  04-setup-end-users-org.sh            Create end-users child org (this is the key step)
+  05-verify-setup.sh                   Verify everything is wired up
+
+credentials/                    Output (generated, gitignored)
+  {service}.json                Service org, admin creds, API key
+  service.json.example          Output schema reference
+  oauth-client.json             OAuth client_id, registration token
+  oauth-client.json.example     Output schema reference
+  hosted-login.json             Applied config + verification
+  hosted-login.json.example     Output schema reference
+  end-users-org.json            End-users org, login URL, permission list
+  end-users-org.json.example    Output schema reference
+
+setup                           CLI entry point (interactive or batch)
+README.md                       Client-facing documentation
+INTENT.txt                      This file
+
+
+DESIGN PRINCIPLES
+-----------------
+ZERO-CONFIG:    Users get permissions from org membership, not per-user grants
+ZERO-MAINTENANCE: No cron, no callbacks, no middleware — it just works
+IDEMPOTENT:     Every script can be run multiple times safely
+ORDERED:        Scripts are numbered; each may depend on outputs from prior steps
+SELF-CONTAINED: Only requires curl, jq, python3, and bash
+ENVIRONMENT-AWARE: AUTH_SERVICE_URL switches between prod/dev/local
+CONFIG-DRIVEN:  All service-specific values live in config/ JSON files
+CREDENTIALS-SEPARATE: Secrets go to credentials/ (gitignored, never committed)
+SCHEMA-DOCUMENTED: .example files show exact input/output contracts
+STANDARD:       Same scripts work for ANY service — just change the config
+
+
+CONTACT
+-------
+Platform team: platform-team@ab0t.com
+Auth service docs: https://auth.service.ab0t.com/docs
