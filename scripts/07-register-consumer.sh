@@ -98,9 +98,10 @@ else
 fi
 
 if [ ${#PROVIDERS[@]} -eq 0 ]; then
-    echo -e "${RED}No provider configs found in $CLIENT_SETUP_DIR/clients.d/${NC}"
-    echo "Create a config file (e.g., clients.d/billing.json) first."
-    exit 1
+    echo -e "${YELLOW}No provider configs found in $CLIENT_SETUP_DIR/clients.d/${NC}"
+    echo "Skipping — this service doesn't consume any upstream providers."
+    echo "To add one: cp clients.d/example.json.example clients.d/<provider>.json"
+    exit 0
 fi
 
 echo ""
