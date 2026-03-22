@@ -38,9 +38,11 @@ STEPS=(
   "01:register-service-permissions:Register service org, permissions, and API key"
   "02:register-oauth-client:Register OAuth client for frontend"
   "03:setup-hosted-login:Configure hosted login page"
-  "04:setup-default-team:Create end-users org with default team (permissions via team membership)"
+  "04:setup-default-team:Create end-users org — users sign up here, auto-join team, get permissions"
   "05:verify-setup:Verify everything is working"
   "06:test-end-user:End-to-end test: register user, verify team + permissions"
+  "07:register-consumer:Register as consumer of upstream mesh services (billing, payment, etc.)"
+  "08:setup-api-consumers:Open your service for other mesh services to self-register as consumers"
 )
 
 # ── Helpers ──
@@ -105,6 +107,20 @@ step_status() {
       ;;
     05) echo "run-anytime" ;;
     06) echo "run-anytime" ;;
+    07)
+      if ls "$SETUP_DIR/credentials/"*-consumer.json 2>/dev/null | head -1 | grep -q .; then
+        echo "done"
+      else
+        echo "pending"
+      fi
+      ;;
+    08)
+      if ls "$SETUP_DIR/credentials/api-consumers"*.json 2>/dev/null | head -1 | grep -q .; then
+        echo "done"
+      else
+        echo "pending"
+      fi
+      ;;
     *)  echo "unknown" ;;
   esac
 }

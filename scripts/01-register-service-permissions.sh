@@ -115,8 +115,13 @@ if [ -f "$SOURCE_CREDS_FILE" ]; then
   EXISTING_USER_ID="$(jq -r '.admin.user_id // empty' "$SOURCE_CREDS_FILE")"
 fi
 
+# INTENT: Admin email can be set via ADMIN_EMAIL env var, or from an existing
+# credentials file, or auto-generated from the service ID. The auto-generated
+# format uses the ADMIN_EMAIL_DOMAIN env var (default: ab0t.com) so clients
+# can use their own domain without editing the script.
 if [ -z "$ADMIN_EMAIL" ]; then
-  ADMIN_EMAIL="mike+${SERVICE_ID}@ab0t.com"
+  ADMIN_EMAIL_DOMAIN="${ADMIN_EMAIL_DOMAIN:-ab0t.com}"
+  ADMIN_EMAIL="${SERVICE_ID}-admin@${ADMIN_EMAIL_DOMAIN}"
 fi
 if [ -z "$ADMIN_PASSWORD" ]; then
   SERVICE_NAME_NO_SPACES="$(echo "$SERVICE_NAME" | tr -d ' ')"

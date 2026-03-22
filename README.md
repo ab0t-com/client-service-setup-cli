@@ -67,10 +67,17 @@ Service Org (your-service)                  <- admin, API key, permission schema
 | **01** | `register-service-permissions.sh` | Creates service org, registers permissions, creates admin + API key |
 | **02** | `register-oauth-client.sh` | Registers OAuth 2.1 public client (PKCE) for your frontend |
 | **03** | `setup-hosted-login.sh` | Configures hosted login page (branding, registration settings) |
-| **04** | `setup-end-users-org.sh` | Creates end-users child org with inherited permissions |
+| **04** | `setup-default-team.sh` | Creates end-users org — users sign up here, auto-join team, get permissions |
 | **05** | `verify-setup.sh` | Verifies everything is configured correctly |
+| **06** | `test-end-user.sh` | End-to-end test: new user registers, gets permissions automatically |
+| **07** | `register-consumer.sh` | Registers as a consumer of upstream mesh services (billing, payment, etc.) |
+| **08** | `setup-api-consumers.sh` | Creates self-service consumer registration org for other services to consume yours |
 
 Each script is **idempotent** — safe to run multiple times.
+
+Steps 01-06 set up your service for **end-users** (humans).
+Step 07 registers your service as a **consumer** of other mesh services.
+Step 08 opens your service as a **provider** so other services can self-register as consumers.
 
 ## Configuration
 
