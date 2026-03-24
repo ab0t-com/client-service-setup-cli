@@ -411,6 +411,47 @@ if [ -f "$OAUTH_CONFIG_FILE" ]; then
 
   if [ -n "$EU_OAUTH_CLIENT_ID" ] && [ "$EU_OAUTH_CLIENT_ID" != "null" ]; then
     echo -e "${GREEN}OAuth client already registered on end-users org: $EU_OAUTH_CLIENT_ID${NC}"
+
+    # Check if redirect_uris need updating (idempotent update)
+    CURRENT_URIS="$(echo "$EXISTING_EU_CLIENTS" | jq -c \
+      '.[] | select(.client_id == "'"$EU_OAUTH_CLIENT_ID"'") | .redirect_uris // []' 2>/dev/null)"
+
+    # Sort both for comparison
+    CURRENT_SORTED="$(echo "$CURRENT_URIS" | jq -c 'sort')"
+    CONFIG_SORTED="$(echo "$REDIRECT_URIS" | jq -c 'sort')"
+
+    if [ "$CURRENT_SORTED" != "$CONFIG_SORTED" ]; then
+      echo -e "${YELLOW}  Redirect URIs differ from config, updating...${NC}"
+
+      UPDATE_RESPONSE="$(curl -s -w "\nHTTP_CODE:%{http_code}" \
+        -X PATCH "$AUTH_SERVICE_URL/auth/oauth/clients/$EU_OAUTH_CLIENT_ID" \
+        -H "Authorization: Bearer $EU_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d '{"redirect_uris": '"$REDIRECT_URIS"'}')"
+
+      HTTP_CODE="$(echo "$UPDATE_RESPONSE" | grep "HTTP_CODE" | cut -d: -f2)"
+
+      if [ "$HTTP_CODE" = "200" ]; then
+        echo -e "${GREEN}  Redirect URIs updated${NC}"
+      else
+        # Try PUT if PATCH not supported
+        UPDATE_RESPONSE="$(curl -s -w "\nHTTP_CODE:%{http_code}" \
+          -X PUT "$AUTH_SERVICE_URL/auth/oauth/clients/$EU_OAUTH_CLIENT_ID" \
+          -H "Authorization: Bearer $EU_TOKEN" \
+          -H "Content-Type: application/json" \
+          -d '{"redirect_uris": '"$REDIRECT_URIS"'}')"
+
+        HTTP_CODE="$(echo "$UPDATE_RESPONSE" | grep "HTTP_CODE" | cut -d: -f2)"
+
+        if [ "$HTTP_CODE" = "200" ]; then
+          echo -e "${GREEN}  Redirect URIs updated${NC}"
+        else
+          echo -e "${YELLOW}  Could not update redirect_uris (HTTP $HTTP_CODE) — may need manual update${NC}"
+        fi
+      fi
+    else
+      echo -e "${GREEN}  Redirect URIs match config${NC}"
+    fi
   else
     REG_RESPONSE="$(curl -s -w "\nHTTP_CODE:%{http_code}" \
       -X POST "$AUTH_SERVICE_URL/auth/oauth/register" \
