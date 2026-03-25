@@ -4,165 +4,294 @@ Set up your service with Auth Mesh in minutes. This CLI registers your service,
 configures authentication, and ensures users can access your application with
 zero ongoing maintenance.
 
-## Quick Start
+## Step-by-Step Setup Guide
+
+### Prerequisites
+
+- **bash** 4.0+, **curl**, **jq** installed
+- Network access to your Auth Mesh instance
+- You know your service's name, ID, and what permissions it needs
+
+### Step 1: Get the setup CLI
+
+Clone or copy this repo into your service's project directory:
 
 ```bash
-# 1. Copy this directory into your project
-cp -r setup/ my-project/setup/
-cd my-project/setup/
-
-# 2. Copy example configs and edit them
-cp config/permissions.json.example config/permissions.json
-cp config/oauth-client.json.example config/oauth-client.json
-cp config/hosted-login.json.example config/hosted-login.json
-# Edit each file for your service
-
-# 3. Run setup
-./setup
+git clone https://github.com/ab0t-com/client-service-setup-cli.git setup
+cd setup
 ```
 
-The interactive CLI guides you through each step. Or run everything at once:
+### Step 2: Configure your service identity — `config/permissions.json`
+
+This is the most important file. It tells Auth Mesh who your service is and what
+permissions it uses.
+
+```bash
+cp config/permissions.json.example config/permissions.json
+```
+
+Open `config/permissions.json` and fill in:
+
+**2a. Service identity** — change these to match YOUR service:
+
+```json
+{
+  "service": {
+    "id": "my-service",           // lowercase, hyphens ok. Used everywhere: org slugs, API keys, permission IDs
+    "name": "My Service",         // human-readable display name
+    "description": "What my service does",
+    "version": "1.0.0",
+    "audience": "my-service",     // JWT audience claim — usually same as service.id
+    "maintainer": "team@yourcompany.com"
+  }
+}
+```
+
+**2b. Registration namespace** — defines the building blocks for permission IDs:
+
+```json
+{
+  "registration": {
+    "service": "my-service",      // permission prefix — all IDs start with this
+    "actions": ["read", "write", "create", "delete", "admin"],  // verbs your service supports
+    "resources": ["items", "reports", "settings"]                // nouns your service manages
+  }
+}
+```
+
+**2c. Permissions** — list every permission your service uses:
+
+```json
+{
+  "permissions": [
+    {
+      "id": "my-service.read.items",        // format: {service}.{action}.{resource}
+      "name": "Read Items",
+      "description": "View items in the catalog",
+      "risk_level": "low",
+      "cost_impact": false,
+      "default_grant": true                  // true = every user gets this automatically
+    },
+    {
+      "id": "my-service.admin",
+      "name": "Administrator",
+      "description": "Full admin access",
+      "risk_level": "critical",
+      "default_grant": false,                // false = admin must grant explicitly
+      "implies": [                           // admin gets all these automatically
+        "my-service.read.items",
+        "my-service.write.items",
+        "my-service.delete.items"
+      ]
+    }
+  ]
+}
+```
+
+How to decide `default_grant`:
+- `true` — core features every user needs (reading data, creating their own resources)
+- `false` — dangerous or admin operations (delete all, admin, cross-tenant access)
+
+**2d. Roles** — group permissions into named roles:
+
+```json
+{
+  "roles": [
+    {
+      "id": "my-service-user",
+      "name": "User",
+      "permissions": ["my-service.read.items", "my-service.write.items"],
+      "default": true                        // new users get this role
+    },
+    {
+      "id": "my-service-admin",
+      "name": "Admin",
+      "permissions": ["my-service.admin"],
+      "default": false
+    }
+  ]
+}
+```
+
+See `config/permissions.json.example` for a complete working example with all fields.
+
+### Step 3: Configure your OAuth client — `config/oauth-client.json`
+
+This registers an OAuth 2.1 client so your frontend can authenticate users.
+
+```bash
+cp config/oauth-client.json.example config/oauth-client.json
+```
+
+Open `config/oauth-client.json` and change:
+
+```json
+{
+  "client_name": "My Service Frontend",      // display name
+  "redirect_uris": [
+    "https://my-service.com/auth/callback",  // your production callback URL
+    "http://localhost:3000/auth/callback"     // keep this for local dev
+  ],
+  "grant_types": ["authorization_code", "refresh_token"],
+  "response_types": ["code"],
+  "token_endpoint_auth_method": "none",      // "none" for SPAs and mobile apps
+  "scope": "openid profile email"
+}
+```
+
+The only things you MUST change:
+- `client_name` — your service's name
+- `redirect_uris` — your actual callback URLs
+
+### Step 4: Configure your login page — `config/hosted-login.json`
+
+This brands the hosted login page your users will see.
+
+```bash
+cp config/hosted-login.json.example config/hosted-login.json
+```
+
+Open `config/hosted-login.json` and change:
+
+```json
+{
+  "branding": {
+    "primary_color": "#111111",              // your brand color (hex)
+    "page_title": "My Service - Sign In"     // browser tab title
+  },
+  "content": {
+    "welcome_message": "Sign in to My Service",
+    "signup_message": "Create your account",
+    "footer_message": "My Service by Your Company"
+  },
+  "auth_methods": {
+    "email_password": true,
+    "signup_enabled": true,                  // set false to disable self-registration
+    "invitation_only": false                 // set true to require invitations
+  },
+  "registration": {
+    "default_role": "end_user",
+    "require_email_verification": false,
+    "collect_name": true
+  },
+  "security": {
+    "post_logout_redirect_uri": "https://my-service.com"  // where to go after logout
+  }
+}
+```
+
+### Step 5: Run the setup
 
 ```bash
 ./setup run
 ```
 
-## How It Works
+This runs steps 01 through 06 in order:
 
-Auth Mesh uses a Zanzibar-based permission model where **permissions are
-inherited through organizational hierarchy**. The setup creates this structure:
+| Step | What happens | What it creates |
+|------|---|---|
+| 01 | Registers your service | Service org + admin account + API key + permissions |
+| 02 | Registers OAuth client | OAuth client_id for your frontend |
+| 03 | Configures login page | Branded login page at auth.service.ab0t.com/login/{slug} |
+| 04 | Creates end-users org | Org where users sign up + default team with auto-join permissions |
+| 05 | Verifies everything | Checks all orgs, teams, login config are correct |
+| 06 | End-to-end test | Registers a test user, verifies they get permissions |
 
+All steps are **idempotent** — safe to run multiple times. If something exists, it's reused.
+
+After setup, your credentials are in `credentials/`:
+
+| File | What's in it | You'll need it for |
+|---|---|---|
+| `credentials/{service}.json` | Org ID, admin creds, API key | Backend config (`AB0T_AUTH_API_KEY`, `AB0T_AUTH_ORG_ID`) |
+| `credentials/oauth-client.json` | OAuth client_id | Frontend SDK config |
+| `credentials/hosted-login.json` | Login page URL, config snapshot | Reference |
+| `credentials/end-users-org.json` | End-users org ID, slug, login URL, permissions | Frontend SDK config (org slug), backend (audience) |
+
+These files are **gitignored** — never commit them.
+
+### Step 6: Wire credentials into your app
+
+**Frontend:**
+
+```javascript
+import { AuthMeshClient } from '@authmesh/sdk';
+
+const auth = new AuthMeshClient({
+  domain: 'https://auth.service.ab0t.com',
+  org: '{org_slug from credentials/end-users-org.json}',
+  clientId: '{client_id from credentials/oauth-client.json}',
+  redirectUri: window.location.origin + '/auth/callback',
+  scope: 'openid profile email',
+});
 ```
-Service Org (your-service)                  <- admin, API key, permission schema
-  |
-  └── End-Users Org (your-service-users)    <- users sign up HERE
-        |   parent_id = service org
-        |   default_role = member
-        |   permissions inherited from org membership
-        |
-        ├── User A (member) -> gets all default_grant permissions
-        ├── User B (member) -> gets all default_grant permissions
-        └── User C (member) -> gets all default_grant permissions
+
+**Backend:**
+
+```python
+from ab0t_auth import AuthGuard
+
+guard = AuthGuard(
+    auth_service_url="https://auth.service.ab0t.com",
+    api_key="{api_key.key from credentials/{service}.json}",
+    audience="{service_audience from credentials/{service}.json}",
+)
 ```
 
-**Zero-config permission model:**
-- Permissions are defined once in `config/permissions.json`
-- Permissions marked `default_grant: true` are set at the org level
-- Users who sign up via hosted login join the end-users org as `member`
-- Members inherit permissions through Zanzibar's org hierarchy
-- No per-user grants. No callbacks. No cron jobs. No maintenance.
+### Step 7 (optional): Consume other mesh services
 
-## Requirements
-
-- **bash** 4.0+
-- **curl**
-- **jq**
-- **python3**
-- Network access to your Auth Mesh instance
-
-## Setup Steps
-
-| Step | Script | What It Does |
-|------|--------|-------------|
-| **01** | `register-service-permissions.sh` | Creates service org, registers permissions, creates admin + API key |
-| **02** | `register-oauth-client.sh` | Registers OAuth 2.1 public client (PKCE) for your frontend |
-| **03** | `setup-hosted-login.sh` | Configures hosted login page (branding, registration settings) |
-| **04** | `setup-end-users-org.sh` | Creates end-users child org with inherited permissions |
-| **05** | `verify-setup.sh` | Verifies everything is configured correctly |
-
-Each script is **idempotent** — safe to run multiple times.
-
-## Configuration
-
-Edit the config files before running setup. See the `.example` files for the
-full schema.
-
-### `config/permissions.json`
-
-Defines your service's permissions, roles, and metadata. This is the source of
-truth for what your service can do and who can do it.
+If your service needs to call other services' APIs (billing, payment, etc.):
 
 ```bash
-cp config/permissions.json.example config/permissions.json
+# Create a config for each provider you want to consume
+cp scripts/service-client-setup/clients.d/example.json.example \
+   scripts/service-client-setup/clients.d/billing.json
+# Edit clients.d/billing.json — set provider details and permissions you need
+
+# Run step 07
+./setup run 07
 ```
 
-**Key fields:**
+See `scripts/service-client-setup/README.md` for detailed instructions.
 
-| Field | Description |
-|-------|-------------|
-| `service.id` | Unique service identifier (used in org slugs, API keys, permission IDs) |
-| `service.audience` | JWT audience claim for token validation |
-| `registration.actions` | Actions your service supports (read, write, delete, etc.) |
-| `registration.resources` | Resources your service manages (items, reports, etc.) |
-| `permissions[].id` | Permission ID in format `{service}.{action}.{resource}` |
-| `permissions[].default_grant` | If `true`, users get this permission via org membership |
-| `roles[].default` | If `true`, this is the default role for self-registered users |
+### Step 8 (optional): Let other services consume yours
 
-See `config/permissions.json.example` for full schema with all fields.
-
-### `config/oauth-client.json`
-
-Configures the OAuth 2.1 client for your frontend application.
+If you want other mesh services to be able to call YOUR APIs:
 
 ```bash
-cp config/oauth-client.json.example config/oauth-client.json
+# Optionally customize tier definitions first
+cp config/api-consumers.json.example config/api-consumers.json
+# Edit config/api-consumers.json — or skip this and it auto-generates from permissions.json
+
+# Run step 08
+./setup run 08
 ```
 
-**Key fields:**
+After this, other services self-register with two API calls. No approval needed.
+See `scripts/service-client-setup/CONSUMER_SELF_SERVICE_GUIDE.md` for the full flow.
 
-| Field | Description |
-|-------|-------------|
-| `client_name` | Display name for the OAuth client |
-| `redirect_uris` | Allowed callback URLs (must include localhost for dev) |
-| `token_endpoint_auth_method` | Use `"none"` for public clients (SPAs, mobile) |
-| `scope` | OAuth scopes (typically `"openid profile email"`) |
+---
 
-See `config/oauth-client.json.example` for full schema.
+## Config File Summary
 
-### `config/hosted-login.json`
-
-Customizes the hosted login page and registration settings.
-
-```bash
-cp config/hosted-login.json.example config/hosted-login.json
-```
-
-**Key fields:**
-
-| Field | Description |
-|-------|-------------|
-| `branding.primary_color` | Brand color for login page |
-| `branding.page_title` | Browser tab title |
-| `auth_methods.signup_enabled` | Allow self-registration |
-| `registration.default_role` | Role for new users (overridden to `member` in step 04) |
-| `security.post_logout_redirect_uri` | Where to send users after logout |
-
-See `config/hosted-login.json.example` for full schema.
+| File | Purpose | When to edit |
+|---|---|---|
+| `config/permissions.json` | Service identity, permissions, roles | Before step 01. This is your service's definition. |
+| `config/oauth-client.json` | OAuth client for frontend auth | Before step 02. Set your redirect URIs. |
+| `config/hosted-login.json` | Login page branding and settings | Before step 03. Set your brand colors and messages. |
+| `config/api-consumers.json` | Consumer tier definitions | Before step 08 (optional). Auto-generates if missing. |
+| `clients.d/{provider}.json` | Per-provider consumer config | Before step 07 (optional). One file per upstream service. |
 
 ## CLI Usage
 
 ```bash
-# Interactive menu
-./setup
-
-# Run all steps
-./setup run
-
-# Run a specific step
-./setup run 01
-./setup run 04
-
-# Check what's configured
-./setup status
-
-# Verify everything works
-./setup verify
-
-# Preview without making changes
-./setup dry-run
-
-# Help
-./setup help
+./setup              # Interactive menu
+./setup run          # Run all pending steps
+./setup run 01       # Run a specific step
+./setup status       # Show what's done and what's pending
+./setup verify       # Run health checks (step 05)
+./setup dry-run      # Preview without making changes
+./setup help         # Show help
 ```
 
 ## Environment Variables
@@ -171,9 +300,7 @@ See `config/hosted-login.json.example` for full schema.
 |----------|---------|-------------|
 | `AUTH_SERVICE_URL` | `https://auth.service.ab0t.com` | Auth Mesh server URL |
 | `DRY_RUN` | `0` | Set to `1` to preview without making changes |
-| `PERMISSIONS_FILE` | `config/permissions.json` | Override permissions config path |
-| `CLIENT_CONFIG` | `config/oauth-client.json` | Override OAuth client config path |
-| `LOGIN_CONFIG` | `config/hosted-login.json` | Override hosted login config path |
+| `ADMIN_EMAIL` | auto-generated | Override admin email (reads from credentials file if exists) |
 
 ### Targeting different environments
 
@@ -181,145 +308,119 @@ See `config/hosted-login.json.example` for full schema.
 # Production (default)
 ./setup run
 
-# Development
-AUTH_SERVICE_URL=https://auth.dev.ab0t.com ./setup run
-
-# Local
+# Local development
 AUTH_SERVICE_URL=http://localhost:8001 ./setup run
 ```
 
 The CLI auto-detects the environment and uses separate credential files
-(e.g., `service-dev.json` vs `service.json`) so you can target multiple
-environments from the same directory.
+(e.g., `service-dev.json` vs `service.json`).
 
-## Generated Credentials
+## How It Works
 
-After setup, the `credentials/` directory contains the generated output.
-These files are **gitignored** — never commit them.
+Auth Mesh uses a Zanzibar-based permission model where **permissions are
+inherited through organizational hierarchy**:
 
-See the `.example` files in `credentials/` for the exact schema of each output:
+```
+Service Org (your-service)                  <- admin, API key, permission schema
+  |
+  +-- End-Users Org (your-service-users)    <- users sign up HERE
+        |   parent_id = service org
+        |
+        +-- Default Users Team              <- holds default_grant permissions
+              |
+              +-- User A (member) -> inherits team permissions
+              +-- User B (member) -> inherits team permissions
+```
 
-| File | Generated By | Contains |
-|------|-------------|----------|
-| `{service}.json` | Step 01 | Org ID, admin creds, API key |
-| `oauth-client.json` | Step 02 | OAuth client_id, registration token |
-| `hosted-login.json` | Step 03 | Login config verification |
-| `end-users-org.json` | Step 04 | End-users org ID, login URL, permission list |
+When a user signs up via hosted login:
+1. They join the end-users org as a `member`
+2. They auto-join the Default Users team
+3. They inherit all `default_grant: true` permissions through team membership
+4. Zanzibar resolves this at permission-check time
+
+No per-user grants. No callbacks. No cron jobs. No maintenance.
+
+## Setup Steps Reference
+
+| Step | Script | Config Input | Credential Output |
+|------|--------|---|---|
+| 01 | `register-service-permissions.sh` | `permissions.json` | `{service}.json` |
+| 02 | `register-oauth-client.sh` | `oauth-client.json` | `oauth-client.json` |
+| 03 | `setup-hosted-login.sh` | `hosted-login.json` | `hosted-login.json` |
+| 04 | `setup-default-team.sh` | `permissions.json` | `end-users-org.json` |
+| 05 | `verify-setup.sh` | all credentials | -- |
+| 06 | `test-end-user.sh` | `end-users-org.json` | -- |
+| 07 | `register-consumer.sh` | `clients.d/*.json` | `{provider}-consumer.json` |
+| 08 | `setup-api-consumers.sh` | `permissions.json` | `api-consumers.json` |
 
 ## Directory Structure
 
 ```
 setup/
-  setup                              CLI entry point
-  README.md                          This file
-  INTENT.txt                         Design intent and architecture notes
-  config/                            Input configs (edit these)
-    permissions.json                 Your service's permission schema
-    permissions.json.example         Schema reference
-    oauth-client.json                OAuth client config
-    oauth-client.json.example        Schema reference
-    hosted-login.json                Login page branding
-    hosted-login.json.example        Schema reference
-  credentials/                       Generated output (gitignored)
-    .gitignore                       Prevents committing secrets
-    service.json.example             Output schema reference
-    oauth-client.json.example        Output schema reference
-    hosted-login.json.example        Output schema reference
-    end-users-org.json.example       Output schema reference
-  scripts/                           Numbered setup scripts
+  setup                               CLI entry point
+  README.md                           This file
+  manifest.json                       File map with intents
+
+  config/                             INPUT — edit these before running
+    permissions.json                  Your service's permission schema
+    permissions.json.example          Copy this to get started
+    oauth-client.json                 OAuth client config
+    oauth-client.json.example         Copy this to get started
+    hosted-login.json                 Login page branding
+    hosted-login.json.example         Copy this to get started
+    api-consumers.json                Consumer tier definitions (step 08)
+    api-consumers.json.example        Copy this to get started
+
+  credentials/                        OUTPUT — generated by scripts (gitignored)
+    {service}.json                    Step 01 output
+    oauth-client.json                 Step 02 output
+    hosted-login.json                 Step 03 output
+    end-users-org.json                Step 04 output
+    {provider}-consumer.json          Step 07 output
+    api-consumers.json                Step 08 output
+
+  scripts/                            Numbered setup scripts
     01-register-service-permissions.sh
     02-register-oauth-client.sh
     03-setup-hosted-login.sh
-    04-setup-end-users-org.sh
+    04-setup-default-team.sh
     05-verify-setup.sh
+    06-test-end-user.sh
+    07-register-consumer.sh
+    08-setup-api-consumers.sh
+    service-client-setup/             Consumer/provider registration engines
+      README.md                       Detailed consumer/provider guide
+      CONSUMER_SELF_SERVICE_GUIDE.md  Self-service flow documentation
+      register-as-client.sh           Co-located registration engine
+      consumer-register.sh            Self-service registration engine
+      provider-accept-consumer.sh     Per-consumer provider setup
+      clients.d/                      Per-provider configs (gitignored)
+        example.json.example          Config template
+
+  schema/                             JSON Schema definitions
+  Skills/                             Claude Code skill definitions
 ```
-
-## After Setup
-
-### Frontend Integration
-
-```javascript
-import { AuthMeshClient } from '@authmesh/sdk';
-
-const auth = new AuthMeshClient({
-  // From credentials/end-users-org.json:
-  domain: 'https://auth.service.ab0t.com',
-  org: '{org_slug from end-users-org.json}',
-
-  // From credentials/oauth-client.json:
-  clientId: '{client_id}',
-
-  redirectUri: window.location.origin + '/auth/callback',
-  scope: 'openid profile email',
-});
-```
-
-### Backend Integration
-
-```python
-from ab0t_auth import AuthGuard
-
-guard = AuthGuard(
-    auth_service_url="https://auth.service.ab0t.com",
-
-    # From credentials/{service}.json:
-    api_key="{api_key.key}",
-    audience="{auth.audience}",    # LOCAL:{org_id}
-)
-```
-
-### Permission Design Tips
-
-- Use `default_grant: true` for any permission a regular user needs
-- Use `default_grant: false` for admin-only or sensitive operations
-- Permission IDs follow `{service}.{action}.{resource}` format
-- Define an `admin` permission with `implies` for admin users
-- The `default_grant` permissions are what users get through org membership
 
 ## Troubleshooting
 
 ### "Permission denied" when running scripts
-
 ```bash
 chmod +x setup scripts/*.sh
 ```
 
 ### Users getting 403
-
 1. Run `./setup verify` to check the setup
-2. Ensure your frontend points to the **end-users org** login URL (not the
-   service org). Check `credentials/end-users-org.json` for the correct URL
-3. Verify the `audience` in your backend matches `LOCAL:{org_id}` from
-   `credentials/{service}.json`
-4. Check that the user signed up through the end-users org hosted login page
+2. Ensure your frontend uses the **end-users org** login URL (from `credentials/end-users-org.json`), not the service org
+3. Verify the `audience` in your backend matches `service_audience` from `credentials/{service}.json`
+4. Check the user signed up through the hosted login page
+
+### Step 01 fails with "Organization operation failed"
+The org slug already exists. If you're re-running setup for an existing service,
+make sure `credentials/{service}.json` exists with the previous run's output —
+the script reads it to find the existing org.
 
 ### "Organization already exists"
-
 Normal — all scripts are idempotent and reuse existing resources.
-
-## Architecture: Why No Per-User Grants
-
-Auth Mesh uses Google Zanzibar (relation-based access control) internally.
-When the setup creates a child org with `parent_id`, the auth server
-automatically creates a Zanzibar parent relationship:
-
-```
-organization:{end-users-org}#parent@org:{service-org}
-```
-
-Permission checks walk this relationship chain. A user who is a `member` of
-the end-users org inherits permissions through the org hierarchy — the same
-way a team member inherits team permissions.
-
-This means:
-- **No per-user permission grants needed** — permissions are structural
-- **No callbacks or cron jobs** — the auth server handles it at check time
-- **New users work immediately** — membership = permissions
-- **Revoking is structural too** — remove from org = lose permissions
-
-This is the same model used by Google (Zanzibar), GitHub (org/team
-permissions), and Slack (workspace membership). It scales to millions of
-users without per-user permission records.
 
 ## Support
 

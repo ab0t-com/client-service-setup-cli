@@ -2,6 +2,16 @@
 config/permissions.json
 config/hosted-login.json
 config/oauth-client.json
+config/api-consumers.json
+
+# Internal docs — design notes, audits, tickets (contain real org IDs, credentials, internal refs)
+internal/
+TASKLIST*
+tasklist*
+
+# Consumer registration configs — contain service account passwords
+scripts/service-client-setup/clients.d/*.json
+!scripts/service-client-setup/clients.d/*.json.example
 
 # Credentials — real secrets live in credentials/*.json (blocked by credentials/.gitignore)
 *.env
