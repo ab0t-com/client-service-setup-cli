@@ -92,6 +92,10 @@
   "end_users": {
     "auto_provision": true,
     "default_role": "my-service-user",
-    "notes": "Users joining via hosted login get 'member' role in the end-users org. Permissions are inherited through org membership in the Zanzibar hierarchy."
+    "org_structure": {
+      "pattern": "flat",
+      "config": {}
+    },
+    "notes": "Users joining via hosted login get 'member' role in the end-users org. Permissions are inherited through team membership (the auth service's default-team flow). Org_structure controls whether each user ALSO gets a private nested workspace org. Pattern 'flat' (default) creates no extra orgs — same as before. Set pattern to 'workspace-per-user' if you want every user to own their own private space (think GitHub user namespaces or Notion personal workspaces). See README's 'Org Structures' section for details."
   }
 }
