@@ -1,6 +1,6 @@
 ---
 name: auth-mesh-setup
-description: Onboard any service to the ab0t Auth Mesh using the setup CLI and numbered scripts (01-08). Use when registering a new service with auth, designing a permissions.json schema, configuring OAuth clients, setting up hosted login pages, creating end-users orgs with team-based permission inheritance, running or debugging setup scripts, understanding the Zanzibar permission model, verifying setup health, troubleshooting registration failures, setting up consumer/provider mesh registration, or adapting the setup system for a new service. Covers the full onboarding lifecycle from config file creation through permission design, org creation, OAuth registration, hosted login branding, default team setup, verification, consumer registration, and provider setup.
+description: Onboard any service to the ab0t Auth Mesh using the setup CLI and numbered scripts (01-08). Use when registering a new service with auth, designing a permissions.json schema, configuring OAuth clients, setting up hosted login pages, creating end-users orgs with team-based permission inheritance, choosing an org_structure pattern (flat vs workspace-per-user), running or debugging setup scripts, understanding the Zanzibar permission model, verifying setup health, troubleshooting registration failures, setting up consumer/provider mesh registration, or adapting the setup system for a new service. Covers the full onboarding lifecycle from config file creation through permission design, org creation, OAuth registration, hosted login branding, default team setup, org structure selection, verification, consumer registration, and provider setup.
 ---
 
 # Auth Mesh Setup
@@ -185,6 +185,97 @@ User registers -> joins end-users org -> auto-joins Default Team -> inherits tea
 ```
 
 No webhooks, cron, callbacks, or per-user grants. Zanzibar resolves it at check time.
+
+## Org Structures (`end_users.org_structure`)
+
+By default new users join a single shared end-users org. For services where each
+user needs a private space (their own API keys, their own teammates, their own
+billable scope), set `org_structure.pattern = "workspace-per-user"` in
+`permissions.json`. The auth service has a built-in event handler that
+materializes the chosen structure on every `auth.user.registered` event.
+
+### When to recommend each pattern
+
+Ask the client what their product looks like:
+
+| If client says... | Recommend |
+|---|---|
+| "shared API anyone can call" | `flat` (default) |
+| "internal dashboard for our staff" | `flat` |
+| "developer tool / playground" | `flat` |
+| "users have their own projects/spaces" | `workspace-per-user` |
+| "users invite teammates into their account" | `workspace-per-user` |
+| "we sell to companies, each gets a tenant" | `workspace-per-user` for now (true B2B "enterprise-on-billing-tier" pattern coming later) |
+| "our users are bots/agents/services" | `flat` (no human ownership concept) |
+
+### How to enable
+
+Two-line addition to `config/permissions.json`:
+
+```json
+{
+  "end_users": {
+    "org_structure": {
+      "pattern": "workspace-per-user"
+    }
+  }
+}
+```
+
+Optional `config` sub-block for fine-tuning (slug template, team name). Defaults
+work fine — only override if the client has specific requirements.
+
+After setup, every new signup gets:
+- The end-users org membership + default team (existing behavior preserved)
+- A NEW nested workspace org under end-users-org
+- Owner role on their workspace
+- Membership in the workspace's own default team (carrying `default_grant` perms)
+
+### What the client gets
+
+```
+End-Users Org (your-service-users)
+  ├── Default Users team        (existing)
+  ├── alice's workspace         (new — settings.type = "user_workspace", owner = alice)
+  │     └── Default team        (with default_grant perms)
+  └── bob's workspace
+        └── Default team
+```
+
+Each user is owner of their own workspace. Cross-user isolation enforced by
+existing Zanzibar permission boundary — Bob cannot see or touch Alice's
+workspace.
+
+### Backward compat (very important)
+
+`org_structure` is optional. Omitting it = `pattern: "flat"` = existing
+behavior. Pure auth-service deploys without setup-kit changes are
+zero-impact for every existing client.
+
+If a client switches from `flat` → `workspace-per-user` later, only NEW
+signups get workspaces. Pre-existing users do NOT get backfilled (login is
+not a creation trigger). This is by design — safe rollout.
+
+### What's coming (NOT shipped yet)
+
+The pattern enum is designed to grow. Future patterns under exploration:
+
+- `enterprise-on-billing-tier` — auto-create enterprise org on billing upgrade
+- `workspace-plus-enterprise` — combination of personal workspace + enterprise upgrade path
+
+Schema enum will be extended additively. Existing client configs never break.
+Clients asking about these patterns today: tell them "coming soon, use
+`workspace-per-user` for now or let us know your specific needs."
+
+### Implementation reference (for the curious)
+
+Auth service module: `appv2/event_handlers/workspace_provisioning.py`. Mirrors
+the existing `zanzibar_sync.py` shape — registered at app startup, subscribes
+to `auth.user.registered`, runs in-process, best-effort error handling.
+Workspaces are NOT a new primitive — they're nested orgs with
+`settings.type = "user_workspace"` and `settings.owner_user_id = <user_id>`.
+The handler reads the org's `login_config.registration.org_structure` to decide
+what to materialize.
 
 ## CLI Usage
 

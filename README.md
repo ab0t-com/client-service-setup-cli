@@ -340,6 +340,131 @@ When a user signs up via hosted login:
 
 No per-user grants. No callbacks. No cron jobs. No maintenance.
 
+## Org Structures (`end_users.org_structure`)
+
+The default behavior above (a single shared end-users pool) suits most services.
+But some products want each user to have a private space — their own API keys,
+their own teammates, their own settings. Think GitHub user namespaces, Notion
+personal workspaces, or Vercel personal scopes.
+
+You declare which structure you want in `permissions.json`:
+
+```json
+{
+  "end_users": {
+    "org_structure": {
+      "pattern": "workspace-per-user"
+    }
+  }
+}
+```
+
+The auth service has built-in event handlers that materialize the structure when
+each user registers. Your backend writes no code.
+
+### Available patterns
+
+| Pattern | What happens on each new signup | When to use |
+|---|---|---|
+| `flat` (default) | User joins end-users org + default team. No extra orgs. | Public APIs, dev tools, internal dashboards. The user is using your shared service. |
+| `workspace-per-user` | User joins end-users org + gets a private nested org under it where they are owner, with their own default team. | Per-user products (LLM gateway, sandbox platform, design tool) where each user manages their own resources, invites teammates, etc. |
+
+### How to enable `workspace-per-user`
+
+Two-line change in `permissions.json`:
+
+```json
+{
+  "end_users": {
+    "org_structure": {
+      "pattern": "workspace-per-user"
+    }
+  }
+}
+```
+
+Optional fine-tuning under `org_structure.config`:
+
+```json
+{
+  "end_users": {
+    "org_structure": {
+      "pattern": "workspace-per-user",
+      "config": {
+        "slug_template": "{service_id}-{email_prefix}-{short_id}",
+        "default_team_name": "Workspace Members"
+      }
+    }
+  }
+}
+```
+
+Then run `./setup run 04` (or `./setup run` for full setup). The CLI writes the
+config into your end-users org's login_config; the auth service's handler reads
+it at runtime.
+
+### What each new user gets after enabling
+
+```
+End-Users Org (your-service-users)
+  |
+  +-- alice's workspace (settings.type = "user_workspace", owner = alice)
+  |     +-- Default team (with your default_grant permissions)
+  |     +-- alice (owner + team member)
+  |
+  +-- bob's workspace (settings.type = "user_workspace", owner = bob)
+        +-- Default team
+        +-- bob (owner + team member)
+```
+
+Each workspace is an org. The user is owner — they can invite teammates,
+create more teams inside their workspace, manage their workspace settings.
+They cannot see or modify other users' workspaces (cross-user isolation
+enforced by the existing Zanzibar permission boundary).
+
+### Backward compatibility
+
+`org_structure` is fully optional. If you omit it, behavior is exactly what it
+was before this feature existed — flat end-users pool with default team. Pure
+auth-service deploys without setup-kit changes are zero-impact.
+
+### Existing users when you enable later
+
+If you switch a service from `flat` to `workspace-per-user` after some users
+have already registered, the existing users do NOT get backfilled workspaces.
+Only new signups (registration events fired AFTER the config change) get
+workspaces. This is by design — login is not a creation trigger. If you need
+to backfill, contact the platform team.
+
+### What's coming (not in this release)
+
+The `org_structure.pattern` enum is designed to grow. Patterns being explored:
+
+- **`enterprise-on-billing-tier`** — when a user upgrades to an enterprise
+  billing tier, automatically provision an enterprise customer org with them
+  as owner. Triggered by billing events, not registration.
+- **`workspace-plus-enterprise`** — combines `workspace-per-user` with the
+  enterprise upgrade path.
+
+These ship when the underlying triggers (billing service events) are wired up.
+The schema enum will be extended additively — your existing config never
+breaks.
+
+### Implementation notes (for the curious)
+
+The auth service runs an in-process event handler (`workspace_provisioning.py`)
+that subscribes to `auth.user.registered`. The handler reads the org's
+`login_config.registration.org_structure` and dispatches to a structure-specific
+materializer. Each materializer uses existing org / team / membership APIs —
+nothing about workspaces is a new primitive in the auth service. A workspace IS
+an org, just nested with a settings tag.
+
+This means: when you enable workspace-per-user, no new data shapes are
+introduced. Existing tooling (org listing endpoints, hierarchy queries, audit
+logs) sees the workspace orgs the same way they see any other nested org. The
+only marker that distinguishes them is `settings.type = "user_workspace"` and
+`settings.owner_user_id = <user_id>`.
+
 ## Setup Steps Reference
 
 | Step | Script | Config Input | Credential Output |
