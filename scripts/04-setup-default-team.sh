@@ -445,6 +445,11 @@ fi
 echo -e "${BLUE}Step 8b: Registering OAuth client on end-users org${NC}"
 
 OAUTH_CONFIG_FILE="${OAUTH_CONFIG_FILE:-$SETUP_DIR/config/oauth-client.json}"
+# Per RFC 7592, every dynamically-registered client is managed via the
+# (registration_client_uri, registration_access_token) pair returned at
+# creation time. Persist it on POST so subsequent runs can reconcile the
+# client (e.g., update redirect_uris) using the right credentials.
+EU_OAUTH_CLIENT_FILE="$SETUP_DIR/credentials/end-users-oauth-client${ENV_SUFFIX}.json"
 EU_OAUTH_CLIENT_ID=""
 
 if [ -f "$OAUTH_CONFIG_FILE" ]; then
@@ -473,30 +478,49 @@ if [ -f "$OAUTH_CONFIG_FILE" ]; then
     if [ "$CURRENT_SORTED" != "$CONFIG_SORTED" ]; then
       echo -e "${YELLOW}  Redirect URIs differ from config, updating...${NC}"
 
-      UPDATE_RESPONSE="$(curl -s -w "\nHTTP_CODE:%{http_code}" \
-        -X PATCH "$AUTH_SERVICE_URL/auth/oauth/clients/$EU_OAUTH_CLIENT_ID" \
-        -H "Authorization: Bearer $EU_TOKEN" \
-        -H "Content-Type: application/json" \
-        -d '{"redirect_uris": '"$REDIRECT_URIS"'}')"
+      # Per RFC 7592, the management endpoint is `registration_client_uri`
+      # and authentication uses `registration_access_token` (not the org
+      # admin Bearer). Both were returned at creation; we read them from
+      # credentials/end-users-oauth-client.json (saved on POST below).
+      RAT=""; RCU=""
+      if [ -f "$EU_OAUTH_CLIENT_FILE" ]; then
+        SAVED_ID="$(jq -r '.client_id // empty' "$EU_OAUTH_CLIENT_FILE")"
+        if [ "$SAVED_ID" = "$EU_OAUTH_CLIENT_ID" ]; then
+          RAT="$(jq -r '.registration_access_token // empty' "$EU_OAUTH_CLIENT_FILE")"
+          RCU="$(jq -r '.registration_client_uri // empty' "$EU_OAUTH_CLIENT_FILE")"
+        fi
+      fi
 
-      HTTP_CODE="$(echo "$UPDATE_RESPONSE" | grep "HTTP_CODE" | cut -d: -f2)"
-
-      if [ "$HTTP_CODE" = "200" ]; then
-        echo -e "${GREEN}  Redirect URIs updated${NC}"
+      if [ -z "$RAT" ] || [ -z "$RCU" ]; then
+        echo -e "${YELLOW}  No registration_access_token saved for $EU_OAUTH_CLIENT_ID${NC}"
+        echo -e "${YELLOW}  This client was created before token persistence was added.${NC}"
+        echo -e "${YELLOW}  Options: (a) delete the client manually and rerun this step to recreate it,${NC}"
+        echo -e "${YELLOW}           (b) register a separate client with a different client_name,${NC}"
+        echo -e "${YELLOW}           (c) leave redirect_uris as-is.${NC}"
       else
-        # Try PUT if PATCH not supported
         UPDATE_RESPONSE="$(curl -s -w "\nHTTP_CODE:%{http_code}" \
-          -X PUT "$AUTH_SERVICE_URL/auth/oauth/clients/$EU_OAUTH_CLIENT_ID" \
-          -H "Authorization: Bearer $EU_TOKEN" \
+          -X PUT "$RCU" \
+          -H "Authorization: Bearer $RAT" \
           -H "Content-Type: application/json" \
-          -d '{"redirect_uris": '"$REDIRECT_URIS"'}')"
+          -d "$(jq -n \
+            --arg client_id "$EU_OAUTH_CLIENT_ID" \
+            --arg client_name "$CLIENT_NAME" \
+            --argjson redirect_uris "$REDIRECT_URIS" \
+            '{client_id:$client_id, client_name:$client_name, redirect_uris:$redirect_uris, grant_types:["authorization_code","refresh_token"], response_types:["code"], token_endpoint_auth_method:"none"}')")"
 
         HTTP_CODE="$(echo "$UPDATE_RESPONSE" | grep "HTTP_CODE" | cut -d: -f2)"
+        UPDATE_BODY="$(echo "$UPDATE_RESPONSE" | grep -v "HTTP_CODE")"
 
         if [ "$HTTP_CODE" = "200" ]; then
           echo -e "${GREEN}  Redirect URIs updated${NC}"
+          # PUT returns the full client object — refresh our saved copy so we
+          # always have the latest metadata (registration_access_token may
+          # have rotated per RFC 7592 §3).
+          echo "$UPDATE_BODY" | jq . > "$EU_OAUTH_CLIENT_FILE"
+          chmod 600 "$EU_OAUTH_CLIENT_FILE" 2>/dev/null || true
         else
-          echo -e "${YELLOW}  Could not update redirect_uris (HTTP $HTTP_CODE) — may need manual update${NC}"
+          echo -e "${YELLOW}  Could not update redirect_uris (HTTP $HTTP_CODE)${NC}"
+          echo "$UPDATE_BODY" | jq . 2>/dev/null || echo "$UPDATE_BODY"
         fi
       fi
     else
@@ -507,14 +531,11 @@ if [ -f "$OAUTH_CONFIG_FILE" ]; then
       -X POST "$AUTH_SERVICE_URL/auth/oauth/register" \
       -H "Authorization: Bearer $EU_TOKEN" \
       -H "Content-Type: application/json" \
-      -d '{
-        "client_name": "'"$CLIENT_NAME"'",
-        "redirect_uris": '"$REDIRECT_URIS"',
-        "grant_types": ["authorization_code", "refresh_token"],
-        "response_types": ["code"],
-        "token_endpoint_auth_method": "none",
-        "application_type": "web"
-      }')"
+      -d "$(jq -n \
+        --arg org_id "$END_USERS_ORG_ID" \
+        --arg client_name "$CLIENT_NAME" \
+        --argjson redirect_uris "$REDIRECT_URIS" \
+        '{org_id:$org_id, client_name:$client_name, redirect_uris:$redirect_uris, grant_types:["authorization_code","refresh_token"], response_types:["code"], token_endpoint_auth_method:"none", application_type:"web"}')")"
 
     HTTP_CODE="$(echo "$REG_RESPONSE" | grep "HTTP_CODE" | cut -d: -f2)"
     REG_BODY="$(echo "$REG_RESPONSE" | grep -v "HTTP_CODE")"
@@ -522,6 +543,12 @@ if [ -f "$OAUTH_CONFIG_FILE" ]; then
     if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
       EU_OAUTH_CLIENT_ID="$(echo "$REG_BODY" | jq -r '.client_id')"
       echo -e "${GREEN}OAuth client registered on end-users org: $EU_OAUTH_CLIENT_ID${NC}"
+      # Persist the full RFC 7591 response so future runs can manage this
+      # client via RFC 7592 (registration_client_uri + registration_access_token).
+      mkdir -p "$(dirname "$EU_OAUTH_CLIENT_FILE")"
+      echo "$REG_BODY" | jq . > "$EU_OAUTH_CLIENT_FILE"
+      chmod 600 "$EU_OAUTH_CLIENT_FILE" 2>/dev/null || true
+      echo -e "${GREEN}  Saved management credentials to: $EU_OAUTH_CLIENT_FILE${NC}"
     else
       echo -e "${YELLOW}OAuth client registration returned HTTP $HTTP_CODE (non-fatal)${NC}"
       echo "$REG_BODY" | jq . 2>/dev/null || echo "$REG_BODY"
