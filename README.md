@@ -294,6 +294,22 @@ See `scripts/service-client-setup/CONSUMER_SELF_SERVICE_GUIDE.md` for the full f
 ./setup help         # Show help
 ```
 
+### Push protection
+
+The repo ships a tracked git hook at `hooks/pre-push` that **refuses any
+push from a clone where setup has been run** — i.e. one that contains
+real `credentials/*.json`, working `config/*.json`, populated
+`scripts/service-client-setup/clients.d/*.json`, or an `internal/`
+directory.
+
+The hook activates the first time you run `./setup` (which sets
+`core.hooksPath=hooks` locally). Working clones therefore become
+read-only with respect to the remote; to push fixes upstream, clone
+fresh into a separate directory, apply your changes there, and push
+from that clean clone.
+
+Bypass for one-off pushes you've verified are safe: `git push --no-verify`.
+
 ## Environment Variables
 
 | Variable | Default | Description |
