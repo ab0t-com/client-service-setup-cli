@@ -380,6 +380,7 @@ PERM_RESPONSE="$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST "$AUTH_SERVICE_UR
   }')"
 
 HTTP_CODE="$(echo "$PERM_RESPONSE" | grep "HTTP_CODE" | cut -d: -f2)"
+PERM_REGISTRY_BODY="$(echo "$PERM_RESPONSE" | grep -v "HTTP_CODE")"
 
 if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
   echo -e "${GREEN}Permission schema registered on end-users org${NC}"
@@ -423,6 +424,7 @@ CONFIG_RESPONSE="$(curl -s -w "\nHTTP_CODE:%{http_code}" \
   -d "$EU_LOGIN_CONFIG")"
 
 HTTP_CODE="$(echo "$CONFIG_RESPONSE" | grep "HTTP_CODE" | cut -d: -f2)"
+LOGIN_CONFIG_PUT_BODY="$(echo "$CONFIG_RESPONSE" | grep -v "HTTP_CODE")"
 
 if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
   echo -e "${GREEN}Hosted login configured${NC}"
@@ -561,6 +563,17 @@ fi
 # Step 9: Save result
 echo -e "${BLUE}Step 9: Saving result${NC}"
 
+# Preserve raw responses from every state-changing call so future runs
+# can verify what the server accepted vs what we requested. See
+# SUGGESTIONS.md for rationale.
+_safe_json() {
+  printf '%s' "${1:-}" | jq -e . >/dev/null 2>&1 && printf '%s' "$1" || printf '{}'
+}
+
+RAW_TEAM_CREATE="$(_safe_json "${TEAM_BODY:-}")"
+RAW_PERM_REGISTRY="$(_safe_json "${PERM_REGISTRY_BODY:-}")"
+RAW_LOGIN_CONFIG_PUT="$(_safe_json "${LOGIN_CONFIG_PUT_BODY:-}")"
+
 mkdir -p "$SETUP_DIR/credentials"
 
 jq -n \
@@ -579,6 +592,9 @@ jq -n \
   --arg structure_pattern "$ORG_STRUCTURE_PATTERN" \
   --argjson structure_config "$ORG_STRUCTURE_CONFIG" \
   --argjson default_permissions "$DEFAULT_PERMS_JSON" \
+  --argjson raw_team_create "$RAW_TEAM_CREATE" \
+  --argjson raw_perm_registry "$RAW_PERM_REGISTRY" \
+  --argjson raw_login_config_put "$RAW_LOGIN_CONFIG_PUT" \
   '{
     org_id: $org_id,
     org_slug: $org_slug,
@@ -601,6 +617,11 @@ jq -n \
       created_at: $date,
       script: "04-setup-default-team.sh",
       note: "Permissions flow through Zanzibar team membership. New users auto-join the default team on registration. If org_structure.pattern is non-flat, the auth service event handler also materializes the configured structure for each new user."
+    },
+    _raw: {
+      team_create: $raw_team_create,
+      permissions_registry_register: $raw_perm_registry,
+      login_config_put: $raw_login_config_put
     }
   }' > "$OUTPUT_FILE"
 

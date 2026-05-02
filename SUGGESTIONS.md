@@ -147,6 +147,8 @@ These don't break functionality but block making the repo public.
 *(Move items here when you ship the fix. Keep one-line entries:
 `commit-sha — short description`. Trim entries older than ~6 months.)*
 
+- `(this commit)` — Steps 01/03/04/08 now persist every JSON server response under `_raw.*` (token expiries, server-canonicalized slugs, actually-granted permissions, etc.) instead of cherry-picking single fields. Top-level shape unchanged for back-compat.
+- `7ab9ad7` — Step 04 persists RFC 7592 management credentials and uses them for end-users client updates
 - `e87461c` — Tracked pre-push hook blocks pushes from clones populated with credentials
 - `4268d0c` — Adds `org_structure.pattern` config (workspace-per-user / flat)
 - `f108e7d` — Step 04 idempotency: update OAuth client redirect_uris when they differ
