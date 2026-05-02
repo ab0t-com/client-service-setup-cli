@@ -22,6 +22,16 @@ SETUP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 export SETUP_DIR
 export AUTH_SERVICE_URL="${AUTH_SERVICE_URL:-https://auth.service.ab0t.com}"
 
+# ── Activate committed git hooks (pre-push credential guard) ──
+# The repo ships hooks under hooks/ rather than .git/hooks/ so they're
+# tracked. Point git at them on first run; subsequent runs are a no-op.
+if [ -d "$SETUP_DIR/hooks" ] && [ -d "$SETUP_DIR/.git" ]; then
+  current_hooks_path="$(git -C "$SETUP_DIR" config --local --get core.hooksPath 2>/dev/null || true)"
+  if [ "$current_hooks_path" != "hooks" ]; then
+    git -C "$SETUP_DIR" config --local core.hooksPath hooks
+  fi
+fi
+
 # Colors
 RED='\033[0;31m'
 GREEN='\033[0;32m'
