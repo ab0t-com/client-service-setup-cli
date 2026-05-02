@@ -199,6 +199,16 @@ fi
 # Step 6: Save result
 echo -e "${BLUE}Step 6: Saving result${NC}"
 
+# Preserve every JSON response from this run so callers can verify what
+# the server actually accepted/normalized (instead of relying on the
+# input we sent). See SUGGESTIONS.md for rationale.
+_safe_json() {
+  printf '%s' "${1:-}" | jq -e . >/dev/null 2>&1 && printf '%s' "$1" || printf '{}'
+}
+
+RAW_PUT_LOGIN_CONFIG="$(_safe_json "${RESPONSE_BODY:-}")"
+RAW_PUBLIC_CONFIG="$(_safe_json "${PUBLIC_RESPONSE:-}")"
+
 mkdir -p "$SETUP_DIR/credentials"
 jq -n \
   --arg org_id "$ORG_ID" \
@@ -209,6 +219,8 @@ jq -n \
   --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg config "$LOGIN_CONFIG" \
   --argjson applied "$LOGIN_CONFIG_PAYLOAD" \
+  --argjson raw_put_login_config "$RAW_PUT_LOGIN_CONFIG" \
+  --argjson raw_public_config "$RAW_PUBLIC_CONFIG" \
   --argjson verification "{
     \"hosted_login_page\": $HOSTED_CODE,
     \"public_config\": $PUBLIC_CODE,
@@ -225,9 +237,14 @@ jq -n \
       auth_service_url: $url,
       source_config: $config,
       applied_at: $date
+    },
+    _raw: {
+      put_login_config: $raw_put_login_config,
+      public_config: $raw_public_config
     }
   }' > "$OUTPUT_FILE"
 
+chmod 600 "$OUTPUT_FILE" 2>/dev/null || true
 echo -e "${GREEN}Saved to: $OUTPUT_FILE${NC}"
 
 echo ""

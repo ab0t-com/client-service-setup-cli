@@ -349,9 +349,12 @@ for i in $(seq 0 $((TIER_COUNT - 1))); do
   FOUND_TEAM="$(echo "$EXISTING_TEAMS" | jq -r --arg name "$T_NAME" \
     '.[] | select(.name == $name) | .id' 2>/dev/null | head -n1)"
 
+  RAW_TEAM=""
   if [ -n "$FOUND_TEAM" ] && [ "$FOUND_TEAM" != "null" ]; then
     TEAM_ID="$FOUND_TEAM"
     echo -e "  ${GREEN}Exists: $TEAM_ID${NC}"
+    # Capture the existing team's full record from the list response
+    RAW_TEAM="$(echo "$EXISTING_TEAMS" | jq --arg id "$TEAM_ID" '.[] | select(.id == $id)' 2>/dev/null)"
   else
     TEAM_RESP="$(curl -s -X POST "$AUTH_SERVICE_URL/organizations/$CONSUMER_ORG_ID/teams" \
       -H "Authorization: Bearer $CON_TOKEN" \
@@ -362,6 +365,7 @@ for i in $(seq 0 $((TIER_COUNT - 1))); do
         \"permissions\": $T_PERMS
       }")"
     TEAM_ID="$(echo "$TEAM_RESP" | jq -r '.id // .team_id // empty')"
+    RAW_TEAM="$TEAM_RESP"
 
     if [ -n "$TEAM_ID" ] && [ "$TEAM_ID" != "null" ]; then
       echo -e "  ${GREEN}Created: $TEAM_ID${NC}"
@@ -376,13 +380,19 @@ for i in $(seq 0 $((TIER_COUNT - 1))); do
     DEFAULT_TEAM_ID="$TEAM_ID"
   fi
 
-  # Accumulate tier info for output
+  # Validate the raw response is JSON; fall back to {} so jq doesn't choke
+  RAW_TEAM_JSON="$(printf '%s' "$RAW_TEAM" | jq -e . >/dev/null 2>&1 && printf '%s' "$RAW_TEAM" || printf '{}')"
+
+  # Accumulate tier info for output. _raw.team holds the server's view of
+  # the team (actual permissions granted may differ from $T_PERMS — the
+  # server can filter or normalize). See SUGGESTIONS.md for rationale.
   TIERS_JSON=$(echo "$TIERS_JSON" | jq \
     --arg name "$T_NAME" \
     --arg team_id "$TEAM_ID" \
     --argjson default "$T_DEFAULT" \
     --argjson perms "$T_PERMS" \
-    '. + [{name: $name, team_id: $team_id, default: $default, permissions: $perms, permission_count: ($perms | length)}]')
+    --argjson raw_team "$RAW_TEAM_JSON" \
+    '. + [{name: $name, team_id: $team_id, default: $default, permissions: $perms, permission_count: ($perms | length), _raw: {team: $raw_team}}]')
 done
 
 echo ""
@@ -417,6 +427,7 @@ LOGIN_RESP="$(curl -s -w "\nHTTP_CODE:%{http_code}" \
   }')"
 
 HTTP_CODE="$(echo "$LOGIN_RESP" | grep "HTTP_CODE" | cut -d: -f2)"
+LOGIN_CONFIG_PUT_BODY="$(echo "$LOGIN_RESP" | grep -v "HTTP_CODE")"
 if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
   echo -e "${GREEN}  Login config applied${NC}"
   echo "  default_role: $DEFAULT_ROLE"
@@ -429,6 +440,20 @@ fi
 # ── Step 7: Save output ──────────────────────────────────────────────
 
 echo -e "${BLUE}Step 7: Saving output${NC}"
+
+# Preserve raw responses from this run so callers can verify the
+# server's view (canonicalized slugs, applied defaults, normalized
+# fields). See SUGGESTIONS.md.
+_safe_json() {
+  printf '%s' "${1:-}" | jq -e . >/dev/null 2>&1 && printf '%s' "$1" || printf '{}'
+}
+
+RAW_ADMIN_LOGIN="$(_safe_json "${RESP_BODY:-}")"
+# CREATE_RESP and PERM_RESP both include a trailing HTTP_CODE marker; strip it.
+RAW_CONSUMER_ORG_CREATE="$(_safe_json "$(printf '%s' "${CREATE_RESP:-}" | grep -v 'HTTP_CODE' || true)")"
+RAW_CONSUMER_LOGIN="$(_safe_json "${CON_LOGIN:-}")"
+RAW_PERM_REGISTRY="$(_safe_json "$(printf '%s' "${PERM_RESP:-}" | grep -v 'HTTP_CODE' || true)")"
+RAW_LOGIN_CONFIG_PUT="$(_safe_json "${LOGIN_CONFIG_PUT_BODY:-}")"
 
 mkdir -p "$(dirname "$OUTPUT_FILE")"
 
@@ -444,6 +469,11 @@ jq -n \
   --arg reg_url "$AUTH_SERVICE_URL/organizations/$CONSUMER_ORG_SLUG/auth/register" \
   --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --argjson tiers "$TIERS_JSON" \
+  --argjson raw_admin_login "$RAW_ADMIN_LOGIN" \
+  --argjson raw_consumer_org_create "$RAW_CONSUMER_ORG_CREATE" \
+  --argjson raw_consumer_login "$RAW_CONSUMER_LOGIN" \
+  --argjson raw_perm_registry "$RAW_PERM_REGISTRY" \
+  --argjson raw_login_config_put "$RAW_LOGIN_CONFIG_PUT" \
   '{
     org_id: $org_id,
     org_slug: $org_slug,
@@ -458,9 +488,17 @@ jq -n \
       auth_service_url: $url,
       created_at: $date,
       script: "08-setup-api-consumers.sh"
+    },
+    _raw: {
+      admin_login: $raw_admin_login,
+      consumer_org_create: $raw_consumer_org_create,
+      consumer_login: $raw_consumer_login,
+      permissions_registry_register: $raw_perm_registry,
+      login_config_put: $raw_login_config_put
     }
   }' > "$OUTPUT_FILE"
 
+chmod 600 "$OUTPUT_FILE" 2>/dev/null || true
 echo -e "${GREEN}  Saved: $OUTPUT_FILE${NC}"
 
 # ── Summary ───────────────────────────────────────────────────────────
