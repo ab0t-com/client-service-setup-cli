@@ -115,8 +115,13 @@ if [ -f "$SOURCE_CREDS_FILE" ]; then
   EXISTING_USER_ID="$(jq -r '.admin.user_id // empty' "$SOURCE_CREDS_FILE")"
 fi
 
+# INTENT: Admin email can be set via ADMIN_EMAIL env var, or from an existing
+# credentials file, or auto-generated from the service ID. The auto-generated
+# format uses the ADMIN_EMAIL_DOMAIN env var (default: ab0t.com) so clients
+# can use their own domain without editing the script.
 if [ -z "$ADMIN_EMAIL" ]; then
-  ADMIN_EMAIL="mike+${SERVICE_ID}@ab0t.com"
+  ADMIN_EMAIL_DOMAIN="${ADMIN_EMAIL_DOMAIN:-ab0t.com}"
+  ADMIN_EMAIL="${SERVICE_ID}-admin@${ADMIN_EMAIL_DOMAIN}"
 fi
 if [ -z "$ADMIN_PASSWORD" ]; then
   SERVICE_NAME_NO_SPACES="$(echo "$SERVICE_NAME" | tr -d ' ')"
@@ -328,33 +333,72 @@ fi
 # Use service-name audience (RFC 9068 §3) instead of LOCAL:{org_id}
 AUTH_AUDIENCE="${SERVICE_AUDIENCE}"
 
-cat > "$CREDS_FILE" <<JSON
-{
-  "service": "$SERVICE_ID",
-  "service_audience": "$SERVICE_AUDIENCE",
-  "auth": {
-    "audience": "$AUTH_AUDIENCE"
-  },
-  "organization": {
-    "id": "$ORG_ID",
-    "name": "$SERVICE_NAME",
-    "slug": "$SERVICE_ID"
-  },
-  "admin": {
-    "email": "$ADMIN_EMAIL",
-    "password": "$ADMIN_PASSWORD",
-    "user_id": "$USER_ID",
-    "access_token": "$ORG_TOKEN",
-    "refresh_token": "$REFRESH_TOKEN"
-  },
-  "api_key": {
-    "id": "$API_KEY_ID",
-    "key": "$API_KEY"
-  },
-  "permissions_source": ".permissions.json",
-  "created_at": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+# ── Persist credentials + raw server responses ───────────────────────────
+# Top-level fields preserve the historical shape (back-compat for downstream
+# scripts). _raw.* preserves every JSON response we received during this run
+# so future operations don't have to re-derive expiry, scopes, normalized
+# slugs, server-side defaults, etc. See SUGGESTIONS.md for rationale.
+_safe_json() {
+  printf '%s' "${1:-}" | jq -e . >/dev/null 2>&1 && printf '%s' "$1" || printf '{}'
 }
-JSON
+
+RAW_REGISTER="$(_safe_json "${REGISTER_RESPONSE:-}")"
+RAW_LOGIN="$(_safe_json "${LOGIN_RESPONSE:-}")"
+RAW_CREATE_ORG="$(_safe_json "${CREATE_ORG_RESPONSE:-}")"
+RAW_ORG_LOGIN="$(_safe_json "${ORG_LOGIN:-}")"
+RAW_JOIN="$(_safe_json "${JOIN_RESP:-}")"
+RAW_PERM_REGISTRY="$(_safe_json "${RESPONSE_BODY:-}")"
+RAW_API_KEY="$(_safe_json "${API_KEY_RESPONSE:-}")"
+
+jq -n \
+  --arg service "$SERVICE_ID" \
+  --arg service_audience "$SERVICE_AUDIENCE" \
+  --arg audience "$AUTH_AUDIENCE" \
+  --arg org_id "$ORG_ID" \
+  --arg org_name "$SERVICE_NAME" \
+  --arg org_slug "$SERVICE_ID" \
+  --arg admin_email "$ADMIN_EMAIL" \
+  --arg admin_password "$ADMIN_PASSWORD" \
+  --arg user_id "${USER_ID:-}" \
+  --arg access_token "$ORG_TOKEN" \
+  --arg refresh_token "${REFRESH_TOKEN:-}" \
+  --arg api_key_id "${API_KEY_ID:-}" \
+  --arg api_key "${API_KEY:-}" \
+  --arg created_at "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" \
+  --argjson raw_register "$RAW_REGISTER" \
+  --argjson raw_login "$RAW_LOGIN" \
+  --argjson raw_create_org "$RAW_CREATE_ORG" \
+  --argjson raw_org_login "$RAW_ORG_LOGIN" \
+  --argjson raw_join "$RAW_JOIN" \
+  --argjson raw_perm_registry "$RAW_PERM_REGISTRY" \
+  --argjson raw_api_key "$RAW_API_KEY" \
+  '{
+    service: $service,
+    service_audience: $service_audience,
+    auth: {audience: $audience},
+    organization: {id: $org_id, name: $org_name, slug: $org_slug},
+    admin: {
+      email: $admin_email,
+      password: $admin_password,
+      user_id: $user_id,
+      access_token: $access_token,
+      refresh_token: $refresh_token
+    },
+    api_key: {id: $api_key_id, key: $api_key},
+    permissions_source: ".permissions.json",
+    created_at: $created_at,
+    _raw: {
+      register: $raw_register,
+      login: $raw_login,
+      create_org: $raw_create_org,
+      org_login: $raw_org_login,
+      join: $raw_join,
+      permissions_registry_register: $raw_perm_registry,
+      api_key_create: $raw_api_key
+    }
+  }' > "$CREDS_FILE"
+
+chmod 600 "$CREDS_FILE" 2>/dev/null || true
 
 echo -e "${GREEN}✓ Credentials saved: $CREDS_FILE${NC}"
 

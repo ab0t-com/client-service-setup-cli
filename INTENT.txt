@@ -49,6 +49,49 @@ This is zero-config, zero-maintenance by design:
 Revoking access is equally simple — remove the user from the org.
 
 
+ORG STRUCTURES (end_users.org_structure)
+----------------------------------------
+The default end-users pool (above) suits services where users are interchangeable
+consumers of a shared API. But some services treat each user as a tenant with
+their own private space — their own API keys, their own teammates, their own
+billable usage. Think GitHub user namespaces, Notion personal workspaces, or
+Vercel personal scopes.
+
+For those services, set:
+
+    end_users.org_structure.pattern = "workspace-per-user"
+
+The auth service's built-in event handler then materializes a private nested
+org for each new user on registration:
+
+    Service Org (your-service)
+      └── End-Users Org
+            ├── Default Users team  (existing behavior preserved)
+            └── alice's workspace   (settings.type = "user_workspace", owner = alice)
+                  ├── Default team  (with default_grant permissions)
+                  └── alice (owner + team member)
+
+The workspace is an org. Alice owns it. She can invite teammates, create more
+teams inside it, manage settings — all using existing org / team / permission
+APIs. Bob (a different signed-up user) cannot see or touch Alice's workspace.
+
+WHY this is shipped as a built-in pattern (not client-side code):
+  - Every per-user product wants this same shape. Universal patterns belong in
+    the platform, not duplicated in 12 client services.
+  - Setup is one config field. Auth handles the rest.
+  - The handler runs in-process inside the auth service — no external service
+    to deploy, no webhook subscription to maintain, no failure mode to handle.
+  - Workspaces are orgs. Nothing about the data model changes. All existing
+    tooling (audit logs, hierarchy queries) just works.
+
+WHAT'S COMING (not in this release):
+  - "enterprise-on-billing-tier"  — auto-create enterprise org on tier upgrade
+  - "workspace-plus-enterprise"   — combines per-user workspace + enterprise path
+
+The org_structure.pattern enum grows additively. Existing client configs never
+break when new patterns are added.
+
+
 WHAT'S IN HERE
 --------------
 config/                         Input configuration (edit these)
