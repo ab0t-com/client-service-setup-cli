@@ -182,15 +182,19 @@ Open `config/hosted-login.json` and change:
     // and 302-redirects the invitee to the URL you configure here.
     "accept_invite_url": "https://my-service.com/welcome",
     "accept_invite_error_url": "https://my-service.com/invite-error",
-    // Allowlist of origins the two URLs above may target. If you leave
-    // this empty, step 03 smart-defaults it from oauth-client.json
-    // redirect_uris (those origins are already trusted for OAuth callbacks).
-    "accept_invite_allowed_origins": ["https://my-service.com"]
+    // Leave [] to smart-default from oauth-client.json redirect_uris
+    // (those origins are already trusted for OAuth callbacks). Or
+    // populate explicitly if your invite-landing origins differ.
+    "accept_invite_allowed_origins": []
   }
 }
 ```
 
 **About the `accept_invite_*` fields** (added by PART3, May 2026):
+
+**Do I need this?** If your service uses `POST /organizations/{id}/invite`
+to onboard users, configure these. If your users only register via your
+app's signup form, you can leave them unset.
 
 When you POST `/organizations/{id}/invite`, the email link points at
 `{AUTH_SERVICE_URL}/accept-invite?code=...`. The auth service then

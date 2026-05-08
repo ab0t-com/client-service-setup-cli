@@ -146,6 +146,18 @@ if [ "$HAS_ALLOWLIST" = "0" ] && [ -f "$OAUTH_CLIENT_CONFIG" ]; then
   fi
 fi
 
+# Coach: if accept_invite_url is unset, the auth service's /accept-invite
+# endpoint falls back to a bundled generic landing page. That's safe but
+# silent — surface the choice once at setup time so the customer knows
+# their invitees aren't getting a branded experience.
+ACCEPT_URL_VALUE="$(echo "$LOGIN_CONFIG_PAYLOAD" | jq -r '.security.accept_invite_url // ""' 2>/dev/null || echo "")"
+if [ -z "$ACCEPT_URL_VALUE" ] || [ "$ACCEPT_URL_VALUE" = "null" ]; then
+  echo -e "${BLUE}INFO:${NC} security.accept_invite_url is unset."
+  echo "       Invitation links will land on the auth service's bundled fallback page."
+  echo "       Set accept_invite_url in $LOGIN_CONFIG to point at your app's"
+  echo "       invitation-acceptance route for a branded experience."
+fi
+
 # Cross-field check: warn (don't fail) if accept_invite_url or
 # accept_invite_error_url are configured but the resolved allowlist
 # doesn't cover them. The auth service will reject the PUT in that
