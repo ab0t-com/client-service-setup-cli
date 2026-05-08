@@ -54,23 +54,30 @@ What each numbered script does, the auth API endpoints it calls, and non-obvious
 
 **Purpose:** Configure login page branding, auth methods, and registration settings.
 
-**Reads:** `config/hosted-login.json`, `credentials/{service_id}.json`
+**Reads:** `config/hosted-login.json`, `credentials/{service_id}.json`, `config/oauth-client.json` (for smart default)
 **Outputs:** `credentials/hosted-login.json`
 
 **API Flow:**
 
 ```
 1. POST /auth/login                              → authenticate as admin
-2. PUT /organizations/{org_id}/login-config       → apply full config (replace)
-3. GET /login/{org_slug}                          → verify page loads (200)
-4. GET /organizations/{org_slug}/login-config/public → verify public config
-5. GET /organizations/{org_slug}/auth/providers   → verify auth methods
+2. (local) Smart-default + pre-flight checks     → see below
+3. PUT /organizations/{org_id}/login-config       → apply full config (replace)
+4. GET /login/{org_slug}                          → verify page loads (200)
+5. GET /organizations/{org_slug}/login-config/public → verify public config
+6. GET /organizations/{org_slug}/auth/providers   → verify auth methods
 ```
+
+**Smart default (PART3 — invitation-link landing):**
+If `security.accept_invite_allowed_origins` is empty/missing, the script derives it from `oauth-client.json` redirect_uris (extracts unique `scheme://host` origins). Those origins are already trusted for OAuth callbacks; reusing them mirrors the existing trust boundary. The script prints which origins were filled. `accept_invite_url` and `accept_invite_error_url` are NEVER smart-defaulted — those are customer-specific UX decisions.
+
+**Pre-flight check:** When `accept_invite_url` / `accept_invite_error_url` is configured but its origin isn't in the (resolved) allowlist, the script prints a YELLOW warning pointing at the right config line. The auth service would otherwise reject the PUT with HTTP 400 — the warning catches it before the network round-trip.
 
 **Gotchas:**
 - `PUT` replaces the entire login config — not a merge/patch
 - Verification HTTP codes are stored in output file for debugging
 - Login page is immediately available after PUT
+- The smart-default origin extraction uses `jq capture("^(?<o>[^/]+//[^/]+)")` — IPv6 hosts inside brackets work; entries that aren't valid URLs are skipped.
 
 ## 04 — setup-default-team.sh
 

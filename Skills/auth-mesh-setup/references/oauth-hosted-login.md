@@ -63,7 +63,10 @@
   },
   "security": {
     "post_logout_redirect_uri": "https://sandbox.dev.ab0t.com",
-    "remember_me_enabled": true
+    "remember_me_enabled": true,
+    "accept_invite_url": "https://sandbox.dev.ab0t.com/welcome",
+    "accept_invite_error_url": "https://sandbox.dev.ab0t.com/invite-error",
+    "accept_invite_allowed_origins": ["https://sandbox.dev.ab0t.com"]
   }
 }
 ```
@@ -82,12 +85,36 @@
 | `registration.default_role` | Role for new users. Step 04 overrides to `"member"` |
 | `registration.default_team` | Team ID for auto-join. Step 04 injects this |
 | `security.post_logout_redirect_uri` | Where to send users after logout |
+| `security.accept_invite_url` | Where the auth service redirects valid invitation clicks. Auth appends `?code=<…>`. Optional — leave unset to use the bundled fallback. |
+| `security.accept_invite_error_url` | Where the auth service redirects used / expired / unknown invitations. Auth appends `?reason=used\|expired\|not_found\|invalid`. Optional. |
+| `security.accept_invite_allowed_origins` | Allowlist of origins (`scheme://host[:port]`, no path) the two URLs above may target. Smart-defaulted by step 03 from `oauth-client.json` redirect_uris if you leave it empty. |
 
 ### Important
 
 - Step 03 applies config via `PUT /organizations/{org_id}/login-config` (full replace, not merge)
 - Step 04 **injects** `registration.default_role = "member"` and `registration.default_team = {team_id}` into this config
 - The hosted login page is public at: `{AUTH_SERVICE_URL}/login/{org_slug}`
+
+### Invitation-link landing (`security.accept_invite_*`)
+
+When you POST `/organizations/{id}/invite`, the email link points at the auth service's canonical `/accept-invite?code=...` endpoint. The auth service then 302-redirects the invitee to **the customer's** app — to whichever URL is configured here.
+
+Why this design:
+- **Email links survive app-domain rebrands.** Click target is `auth.service.ab0t.com`; only the redirect destination changes when you update `accept_invite_url`.
+- **Failed invitations get a useful page.** Used / expired / unknown codes redirect to `accept_invite_error_url?reason=...` so the customer's app can render a friendly message instead of "invalid token".
+
+Smart-default behavior (step 03):
+- `accept_invite_allowed_origins` — IF empty/missing in user config, derived from `oauth-client.json` redirect_uris. Those origins are already trusted for OAuth callbacks; reusing them mirrors the existing trust boundary.
+- `accept_invite_url` / `accept_invite_error_url` — NEVER smart-defaulted. Customer-specific UX decisions; a wrong default would silently misroute invitees. Leave unset to use the bundled fallback page.
+
+Pre-flight check (step 03 + `validate-config.sh`): warns when a configured URL's origin isn't in the allowlist (auth would reject the PUT with HTTP 400; warning catches it before the network round-trip).
+
+Allowlist rules (mirrors OAuth `redirect_uris`):
+- Each entry is `scheme://host[:port]` — no path, no trailing slash.
+- `https://app.example.com` and `http://app.example.com` are different origins (scheme is part of the comparison).
+- Auth service rejects writes where the URL origin is not in the allowlist.
+
+Auth-service code: `appv2/modules/hosted_login/api/accept_invite.py` (endpoint), `appv2/services/organization/invitation_service.py:lookup_invitation_by_code` (read-only state lookup). Ticket: `tickets/20260508_invitation_list_returns_empty_and_no_email/PART3`.
 
 ## Hosted Login URLs
 
@@ -99,6 +126,7 @@
 | `POST /organizations/{org_slug}/auth/login` | Org-scoped login |
 | `POST /organizations/{org_slug}/auth/register` | Org-scoped registration |
 | `POST /organizations/{org_slug}/auth/authorize` | OAuth authorization (PKCE) |
+| `GET /accept-invite?code=...` | Public invitation-link landing — 302-redirects to the org's `accept_invite_url` (valid) or `accept_invite_error_url?reason=...` (used/expired/unknown). Falls back to a bundled HTML page when the org has no PART3 config. Sets `Referrer-Policy: no-referrer`. Rate-limited per IP. |
 
 ## Two Integration Patterns
 

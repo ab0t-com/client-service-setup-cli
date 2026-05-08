@@ -59,6 +59,28 @@ bash scripts/01-register-service-permissions.sh
 
 **Fix:** Re-run step 03 with the correct `hosted-login.json`.
 
+### "PUT login-config returned 400 — Login config validation failed"
+
+**Cause:** A cross-field validation rejected the write. Most common: `security.accept_invite_url` or `security.accept_invite_error_url` has an origin that isn't in `security.accept_invite_allowed_origins`. Auth-service detail goes to its server logs (intentionally not surfaced in the client response).
+
+**Fix:**
+1. Run `./scripts/validate-config.sh` — it prints the offending field with the offending origin.
+2. Either add the origin to `security.accept_invite_allowed_origins` or change the URL.
+3. Different schemes count as different origins — `https://app.example.com` and `http://app.example.com` need separate allowlist entries.
+4. Allowlist entries must be clean origins: `scheme://host[:port]` with no path, no trailing slash.
+
+### Invite email link lands on a generic "this invitation link cannot be used" page
+
+**Cause:** The org has no `security.accept_invite_url` configured, so `/accept-invite` falls back to the bundled error page. Backward-compatibility safety net — the underlying invitation row is still consumable via `POST /auth/register {invitation_code}`.
+
+**Fix:** Set `security.accept_invite_url` and `security.accept_invite_allowed_origins` in `config/hosted-login.json`, then re-run step 03. See [oauth-hosted-login.md → Invitation-link landing](oauth-hosted-login.md#invitation-link-landing-securityaccept_invite_).
+
+### Invite email points at a domain my customer's frontend doesn't host
+
+**Cause:** Pre-PART3 invitation emails embedded `{FRONTEND_URL}/orgs/{slug}/accept-invite?code=`. Post-PART3 they embed `{AUTH_SERVICE_URL}/accept-invite?code=` and the auth service redirects to whatever the customer configured. If the redirect destination is wrong, fix it on the org's login_config — DON'T edit the email template.
+
+**Fix:** Update `security.accept_invite_url` and re-run step 03.
+
 ## Default Team Errors (Step 04)
 
 ### "Failed to create end-users org"
