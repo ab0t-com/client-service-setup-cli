@@ -108,6 +108,27 @@
         "remember_me_enabled": {
           "type": "boolean",
           "description": "Show 'Remember me' checkbox on login form"
+        },
+        "accept_invite_url": {
+          "type": "string",
+          "format": "uri",
+          "description": "URL the auth service redirects to from /accept-invite when the invitation code is valid. The auth service appends ?code=<...> to this URL. Origin must match an entry in accept_invite_allowed_origins. Leave unset to use the bundled fallback page.",
+          "examples": ["https://my-service.example.com/welcome"]
+        },
+        "accept_invite_error_url": {
+          "type": "string",
+          "format": "uri",
+          "description": "URL the auth service redirects to when the invitation code is used / expired / unknown. The auth service appends ?reason=used|expired|not_found|invalid. Origin must match an entry in accept_invite_allowed_origins. Leave unset to use the bundled fallback page.",
+          "examples": ["https://my-service.example.com/invite-error"]
+        },
+        "accept_invite_allowed_origins": {
+          "type": "array",
+          "description": "Allowlist of origins (scheme + host + optional port) that accept_invite_url and accept_invite_error_url may target. Mirrors the OAuth redirect_uris allowlist pattern — prevents open-redirect even if the config row is mutated out-of-band. Format: 'https://app.example.com' (no path, no trailing slash). 03-setup-hosted-login.sh will smart-default this from oauth-client.json's redirect_uris if you leave it empty.",
+          "items": {
+            "type": "string",
+            "format": "uri"
+          },
+          "examples": [["https://my-service.example.com"]]
         }
       },
       "additionalProperties": false

@@ -136,8 +136,40 @@ cp config/hosted-login.json.example config/hosted-login.json
 | `auth_methods.signup_enabled` | Allow self-registration |
 | `registration.default_role` | Role for new users (overridden to `member` in step 04) |
 | `security.post_logout_redirect_uri` | Where to send users after logout |
+| `security.accept_invite_url` | Where the auth service redirects valid invitation clicks. Auth appends `?code=<...>`. |
+| `security.accept_invite_error_url` | Where the auth service redirects used / expired / unknown invitations. Auth appends `?reason=used\|expired\|not_found\|invalid`. |
+| `security.accept_invite_allowed_origins` | Allowlist of origins the two URLs above may target. Smart-defaulted from `oauth-client.json` redirect_uris if you leave it empty. |
 
 See `config/hosted-login.json.example` for full schema.
+
+#### Invitation-link redirect (`security.accept_invite_*`)
+
+When you POST `/organizations/{id}/invite`, the email link points at the
+auth service's canonical `/accept-invite?code=...` endpoint. The auth
+service then 302-redirects the invitee to **your** app — to the URL you
+configure here. Two reasons this matters:
+
+1. **Email links don't break when you rebrand your app domain.** The
+   click target is on `auth.service.ab0t.com`; only the redirect
+   destination changes when you update `accept_invite_url`.
+2. **Failed invitations get a useful page.** Used / expired / unknown
+   codes redirect to `accept_invite_error_url?reason=...` so your app
+   can render a friendly message instead of "invalid token".
+
+**Smart defaults.** If you leave `accept_invite_allowed_origins` empty,
+step 03 fills it from your OAuth client's `redirect_uris` (those origins
+are already trusted for OAuth callbacks, so reusing them mirrors the
+existing trust boundary). The two URL fields are NOT smart-defaulted —
+they are customer-specific UX decisions and a wrong default would
+silently send invitees to an unexpected page. Leave them unset to use
+the bundled fallback page on the auth service.
+
+**Allowlist rules** (mirrors OAuth `redirect_uris`):
+- Each entry is `scheme://host[:port]` — no path, no trailing slash.
+- `https://app.example.com` and `http://app.example.com` are different
+  origins (scheme is part of the comparison).
+- The auth service rejects writes where `accept_invite_url` /
+  `accept_invite_error_url` origin is not in the allowlist.
 
 ## CLI Usage
 
