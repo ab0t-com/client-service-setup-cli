@@ -175,10 +175,35 @@ Open `config/hosted-login.json` and change:
     "collect_name": true
   },
   "security": {
-    "post_logout_redirect_uri": "https://my-service.com"  // where to go after logout
+    "post_logout_redirect_uri": "https://my-service.com",  // where to go after logout
+
+    // PART3 — invitation-link landing redirect (optional but recommended).
+    // The auth service hosts /accept-invite as the canonical click target
+    // and 302-redirects the invitee to the URL you configure here.
+    "accept_invite_url": "https://my-service.com/welcome",
+    "accept_invite_error_url": "https://my-service.com/invite-error",
+    // Allowlist of origins the two URLs above may target. If you leave
+    // this empty, step 03 smart-defaults it from oauth-client.json
+    // redirect_uris (those origins are already trusted for OAuth callbacks).
+    "accept_invite_allowed_origins": ["https://my-service.com"]
   }
 }
 ```
+
+**About the `accept_invite_*` fields** (added by PART3, May 2026):
+
+When you POST `/organizations/{id}/invite`, the email link points at
+`{AUTH_SERVICE_URL}/accept-invite?code=...`. The auth service then
+302-redirects the invitee to **your** app — to whichever URL you
+configure here.
+
+- `accept_invite_url` — where valid invitations land. Auth appends `?code=<...>`.
+- `accept_invite_error_url` — where used / expired / unknown invitations land. Auth appends `?reason=used|expired|not_found|invalid`.
+- `accept_invite_allowed_origins` — open-redirect defense. Each entry is `scheme://host[:port]` (no path). Smart-defaulted from `oauth-client.json` redirect_uris when empty.
+
+Leave the URL fields unset to use the bundled fallback page on the auth
+service. Different schemes count as different origins (`https://app` and
+`http://app` need separate allowlist entries).
 
 ### Step 5: Run the setup
 

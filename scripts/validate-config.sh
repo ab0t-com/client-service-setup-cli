@@ -268,6 +268,46 @@ validate_hosted_login() {
   if [ "$signup" = "true" ] && [ "$invite" = "true" ]; then
     warn "signup_enabled and invitation_only are both true — invitation_only overrides signup"
   fi
+
+  # Accept-invite redirect (PART3) consistency.
+  # Each URL must have its origin present in the allowlist, otherwise
+  # the auth service rejects the PUT with HTTP 400.
+  local allowlist_count
+  allowlist_count="$(jq -r '(.security.accept_invite_allowed_origins // []) | length' "$file")"
+  for field in accept_invite_url accept_invite_error_url; do
+    local url url_origin in_list
+    url="$(jq -r ".security.${field} // \"\"" "$file")"
+    if [ -z "$url" ] || [ "$url" = "null" ]; then
+      continue
+    fi
+    url_origin="$(printf '%s' "$url" | sed -nE 's|^([^/]+//[^/]+).*$|\1|p')"
+    if [ -z "$url_origin" ]; then
+      warn "security.${field} is not a valid URL"
+      continue
+    fi
+    if [ "$allowlist_count" = "0" ]; then
+      warn "security.${field} is set but security.accept_invite_allowed_origins is empty (03-setup-hosted-login.sh will smart-default it from oauth-client.json redirect_uris if available)"
+      continue
+    fi
+    in_list="$(jq -r --arg o "$url_origin" \
+      '(.security.accept_invite_allowed_origins // []) | map(ascii_downcase) | index($o | ascii_downcase) // "no"' \
+      "$file")"
+    if [ "$in_list" = "no" ]; then
+      warn "security.${field} origin '$url_origin' is not in security.accept_invite_allowed_origins (auth service will reject the PUT with HTTP 400)"
+    else
+      pass "security.${field} origin '$url_origin' is allowlisted"
+    fi
+  done
+
+  # Allowlist entries must be clean origins (scheme + host, no path).
+  local i=0
+  while IFS= read -r entry; do
+    [ -z "$entry" ] && continue
+    if ! printf '%s' "$entry" | grep -qE '^https?://[^/]+/?$'; then
+      warn "security.accept_invite_allowed_origins[$i] '$entry' is not a clean origin — should be 'https://host[:port]' with no path"
+    fi
+    i=$((i + 1))
+  done < <(jq -r '(.security.accept_invite_allowed_origins // [])[]?' "$file" 2>/dev/null)
 }
 
 validate_oauth_client() {

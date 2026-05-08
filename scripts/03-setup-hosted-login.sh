@@ -104,6 +104,62 @@ echo ""
 
 LOGIN_CONFIG_PAYLOAD="$(cat "$LOGIN_CONFIG")"
 
+# ──────────────────────────────────────────────────────────────
+# Smart default: accept_invite_allowed_origins
+# ──────────────────────────────────────────────────────────────
+# If the customer left security.accept_invite_allowed_origins empty (or
+# missing), derive it from the OAuth client's redirect_uris. Those
+# origins are already trusted for OAuth callbacks — using them as the
+# invite-landing allowlist mirrors that trust boundary and removes a
+# duplicated-config foot-gun.
+#
+# We DO NOT smart-default accept_invite_url / accept_invite_error_url —
+# those are customer-specific UX decisions and a wrong default would
+# silently send invitees somewhere unexpected. Empty values for those
+# trigger the bundled fallback page on the auth service.
+#
+# Only runs when oauth-client.json exists (the consumer of step 02) AND
+# the user-provided config has no allowlist values.
+OAUTH_CLIENT_CONFIG="${OAUTH_CLIENT_CONFIG:-$SETUP_DIR/config/oauth-client.json}"
+HAS_ALLOWLIST="$(echo "$LOGIN_CONFIG_PAYLOAD" \
+  | jq -r '(.security.accept_invite_allowed_origins // []) | length')"
+if [ "$HAS_ALLOWLIST" = "0" ] && [ -f "$OAUTH_CLIENT_CONFIG" ]; then
+  # Extract unique origins (scheme + netloc) from redirect_uris.
+  DERIVED_ORIGINS="$(jq -r '
+    (.redirect_uris // [])
+    | map(capture("^(?<o>[^/]+//[^/]+)") | .o)
+    | unique
+  ' "$OAUTH_CLIENT_CONFIG" 2>/dev/null)"
+  DERIVED_COUNT="$(echo "$DERIVED_ORIGINS" | jq -r 'length' 2>/dev/null || echo 0)"
+  if [ "$DERIVED_COUNT" -gt 0 ] 2>/dev/null; then
+    echo -e "${YELLOW}Smart default: filling security.accept_invite_allowed_origins from oauth-client.json${NC}"
+    echo "  Derived $DERIVED_COUNT origin(s) from redirect_uris:"
+    echo "$DERIVED_ORIGINS" | jq -r '.[]' | sed 's/^/    /'
+    LOGIN_CONFIG_PAYLOAD="$(echo "$LOGIN_CONFIG_PAYLOAD" \
+      | jq --argjson o "$DERIVED_ORIGINS" \
+        '.security.accept_invite_allowed_origins = $o')"
+  fi
+fi
+
+# Cross-field check: warn (don't fail) if accept_invite_url or
+# accept_invite_error_url are configured but the resolved allowlist
+# doesn't cover them. The auth service will reject the PUT in that
+# case anyway with HTTP 400 — pre-flight here gives a friendlier
+# error pointing at the right line.
+for FIELD in accept_invite_url accept_invite_error_url; do
+  URL="$(echo "$LOGIN_CONFIG_PAYLOAD" | jq -r ".security.${FIELD} // \"\"")"
+  if [ -z "$URL" ] || [ "$URL" = "null" ]; then continue; fi
+  URL_ORIGIN="$(printf '%s' "$URL" | sed -nE 's|^([^/]+//[^/]+).*$|\1|p')"
+  IN_LIST="$(echo "$LOGIN_CONFIG_PAYLOAD" \
+    | jq -r --arg o "$URL_ORIGIN" \
+      '(.security.accept_invite_allowed_origins // []) | map(ascii_downcase) | index($o | ascii_downcase) // "no"')"
+  if [ "$IN_LIST" = "no" ]; then
+    echo -e "${YELLOW}WARNING:${NC} security.${FIELD} origin '$URL_ORIGIN' is not in security.accept_invite_allowed_origins"
+    echo "         The auth service will reject this PUT with HTTP 400."
+    echo "         Add '$URL_ORIGIN' to security.accept_invite_allowed_origins in $LOGIN_CONFIG"
+  fi
+done
+
 if [ "$DRY_RUN" = "1" ]; then
   echo -e "${YELLOW}=== DRY RUN ===${NC}"
   echo "Would PUT to: $AUTH_SERVICE_URL/organizations/$ORG_ID/login-config"

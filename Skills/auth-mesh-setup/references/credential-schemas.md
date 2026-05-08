@@ -95,6 +95,7 @@ Output files created by each setup script. All stored in `credentials/` and giti
 |-------|-------------|
 | `hosted_login_url` | Public login page URL — give to users / link from frontend |
 | `verification.*` | HTTP status codes from verification requests — all should be 200 |
+| `applied_config.security.accept_invite_*` | If step 03 smart-defaulted `accept_invite_allowed_origins` from `oauth-client.json`, the resolved values land here. Diff this against `config/hosted-login.json` to see what was filled. |
 
 ## credentials/end-users-org.json (step 04)
 

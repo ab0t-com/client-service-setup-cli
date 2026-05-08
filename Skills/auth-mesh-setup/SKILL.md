@@ -123,7 +123,7 @@ This runs steps 01-06:
 |------|---|---|---|
 | 01 | Creates service org, admin, permissions, API key | `permissions.json` | `{service}.json` |
 | 02 | Registers OAuth client for frontend | `oauth-client.json` | `oauth-client.json` |
-| 03 | Configures hosted login page | `hosted-login.json` | `hosted-login.json` |
+| 03 | Configures hosted login page + invitation-link landing redirect | `hosted-login.json` (+ `oauth-client.json` for smart defaults) | `hosted-login.json` |
 | 04 | Creates end-users org + default team with auto-join | `permissions.json` | `end-users-org.json` |
 | 05 | Verifies everything | all credentials | -- |
 | 06 | E2E test: registers user, checks permissions | `end-users-org.json` | -- |
