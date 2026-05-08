@@ -26,6 +26,6 @@
     "remember_me_enabled": true,
     "accept_invite_url": "https://my-service.example.com/welcome",
     "accept_invite_error_url": "https://my-service.example.com/invite-error",
-    "accept_invite_allowed_origins": ["https://my-service.example.com"]
+    "accept_invite_allowed_origins": []
   }
 }
