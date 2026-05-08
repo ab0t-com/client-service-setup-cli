@@ -122,14 +122,18 @@ LOGIN_CONFIG_PAYLOAD="$(cat "$LOGIN_CONFIG")"
 # the user-provided config has no allowlist values.
 OAUTH_CLIENT_CONFIG="${OAUTH_CLIENT_CONFIG:-$SETUP_DIR/config/oauth-client.json}"
 HAS_ALLOWLIST="$(echo "$LOGIN_CONFIG_PAYLOAD" \
-  | jq -r '(.security.accept_invite_allowed_origins // []) | length')"
+  | jq -r '(.security.accept_invite_allowed_origins // []) | length' 2>/dev/null || echo 0)"
 if [ "$HAS_ALLOWLIST" = "0" ] && [ -f "$OAUTH_CLIENT_CONFIG" ]; then
   # Extract unique origins (scheme + netloc) from redirect_uris.
+  # `try ... catch empty` skips entries that don't match the regex (no
+  # scheme, malformed) instead of aborting the whole map under set -e.
+  # Outer `|| echo '[]'` is a belt-and-braces fallback for any other
+  # jq failure (file unreadable, malformed JSON we somehow missed).
   DERIVED_ORIGINS="$(jq -r '
     (.redirect_uris // [])
-    | map(capture("^(?<o>[^/]+//[^/]+)") | .o)
+    | map(try (capture("^(?<o>[^/]+//[^/]+)") | .o) catch empty)
     | unique
-  ' "$OAUTH_CLIENT_CONFIG" 2>/dev/null)"
+  ' "$OAUTH_CLIENT_CONFIG" 2>/dev/null || echo '[]')"
   DERIVED_COUNT="$(echo "$DERIVED_ORIGINS" | jq -r 'length' 2>/dev/null || echo 0)"
   if [ "$DERIVED_COUNT" -gt 0 ] 2>/dev/null; then
     echo -e "${YELLOW}Smart default: filling security.accept_invite_allowed_origins from oauth-client.json${NC}"
@@ -137,7 +141,8 @@ if [ "$HAS_ALLOWLIST" = "0" ] && [ -f "$OAUTH_CLIENT_CONFIG" ]; then
     echo "$DERIVED_ORIGINS" | jq -r '.[]' | sed 's/^/    /'
     LOGIN_CONFIG_PAYLOAD="$(echo "$LOGIN_CONFIG_PAYLOAD" \
       | jq --argjson o "$DERIVED_ORIGINS" \
-        '.security.accept_invite_allowed_origins = $o')"
+        '.security.accept_invite_allowed_origins = $o' \
+      || echo "$LOGIN_CONFIG_PAYLOAD")"
   fi
 fi
 
@@ -150,6 +155,11 @@ for FIELD in accept_invite_url accept_invite_error_url; do
   URL="$(echo "$LOGIN_CONFIG_PAYLOAD" | jq -r ".security.${FIELD} // \"\"")"
   if [ -z "$URL" ] || [ "$URL" = "null" ]; then continue; fi
   URL_ORIGIN="$(printf '%s' "$URL" | sed -nE 's|^([^/]+//[^/]+).*$|\1|p')"
+  # Malformed URL (no scheme://) → skip silently. validate-config.sh
+  # has a dedicated "not a valid URL" warning that's the right place
+  # to surface this; printing "'' is not in allowlist" here would be
+  # confusing (the user's mistake is the URL, not the allowlist).
+  if [ -z "$URL_ORIGIN" ]; then continue; fi
   IN_LIST="$(echo "$LOGIN_CONFIG_PAYLOAD" \
     | jq -r --arg o "$URL_ORIGIN" \
       '(.security.accept_invite_allowed_origins // []) | map(ascii_downcase) | index($o | ascii_downcase) // "no"')"

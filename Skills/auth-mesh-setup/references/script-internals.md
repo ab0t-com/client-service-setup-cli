@@ -77,7 +77,7 @@ If `security.accept_invite_allowed_origins` is empty/missing, the script derives
 - `PUT` replaces the entire login config — not a merge/patch
 - Verification HTTP codes are stored in output file for debugging
 - Login page is immediately available after PUT
-- The smart-default origin extraction uses `jq capture("^(?<o>[^/]+//[^/]+)")` — IPv6 hosts inside brackets work; entries that aren't valid URLs are skipped.
+- The smart-default origin extraction uses `jq capture("^(?<o>[^/]+//[^/]+)")` wrapped in `try … catch empty`. IPv6 hosts inside brackets capture cleanly; entries that don't match the regex (no scheme, malformed) are silently skipped instead of aborting the whole map under `set -e`. Outer `|| echo '[]'` handles unexpected jq failure (file unreadable etc).
 
 ## 04 — setup-default-team.sh
 
