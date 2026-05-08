@@ -87,7 +87,7 @@
         "properties": {
           "id": {
             "type": "string",
-            "pattern": "^[a-z][a-z0-9_]*\\.[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)?$",
+            "pattern": "^[a-z][a-z0-9_-]*\\.[a-z][a-z0-9_]*(\\.[a-z][a-z0-9_]*)?$",
             "description": "Permission ID in {service}.{action}.{resource} or {service}.{action} format",
             "examples": ["integration.read.services", "integration.admin"]
           },
@@ -212,6 +212,52 @@
           "type": "string",
           "enum": ["org_join", "first_login", "invite_accept"],
           "description": "When user provisioning occurs"
+        },
+        "org_structure": {
+          "type": "object",
+          "description": "Predefined org hierarchy pattern to materialize when a user registers via hosted login. The auth service's event handler reads this at runtime and creates the configured structure. Leaving this block out (or setting pattern 'flat') means no extra orgs are created — users simply join the end-users org with the default team, which is the standard behavior.",
+          "properties": {
+            "pattern": {
+              "type": "string",
+              "enum": ["flat", "workspace-per-user"],
+              "default": "flat",
+              "description": "Which org structure to build on registration. Available patterns:\n\n• 'flat' — no extra orgs. Users join the end-users org and the default team only. This is the existing behavior and the safe default.\n\n• 'workspace-per-user' — each new user gets a private nested org (a 'workspace') under the end-users org, with themselves as owner and their own default team. Useful for services where each user needs a personal space: their own API keys, their own teammates, their own settings. Similar to GitHub user namespaces, Notion personal workspaces, or Vercel personal scopes."
+            },
+            "config": {
+              "type": "object",
+              "description": "Pattern-specific configuration. Fields below apply to 'workspace-per-user'. For 'flat' this block is ignored — you can omit it entirely.",
+              "properties": {
+                "slug_template": {
+                  "type": "string",
+                  "description": "Template for the workspace slug (the URL-friendly identifier). Variables: {email_prefix} — lowercased local part of the email (e.g. 'alice' from 'Alice@acme.com'), {short_id} — 6-char random hex suffix to prevent collisions between users with similar emails. Setup script 04 pre-substitutes {service_id} at config-write time so the runtime handler doesn't need to know your service id. Default: '{email_prefix}-{short_id}'.",
+                  "examples": [
+                    "{email_prefix}-{short_id}",
+                    "{service_id}-{email_prefix}-{short_id}"
+                  ]
+                },
+                "name_template": {
+                  "type": "string",
+                  "description": "Template for the workspace display name shown in UI / org listings. Variables: {email}, {email_prefix}. Default: \"{email_prefix}'s workspace\".",
+                  "examples": [
+                    "{email_prefix}'s workspace",
+                    "Workspace for {email}"
+                  ]
+                },
+                "default_team_name": {
+                  "type": "string",
+                  "description": "Display name for the team that holds default permissions inside each workspace. Default: 'Default'.",
+                  "examples": ["Default", "Workspace Users", "All Users"]
+                },
+                "default_team_permissions": {
+                  "type": "array",
+                  "items": { "type": "string" },
+                  "description": "Permission IDs to grant to the workspace's default team. Usually left empty here — setup script 04 auto-populates this from your permissions[] array by selecting every permission where default_grant is true. Override only if the workspace team should carry a different permission set than your end-users team. Each ID must exist in your permissions[] array."
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false
         },
         "notes": { "type": "string" }
       },

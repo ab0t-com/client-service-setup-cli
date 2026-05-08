@@ -135,6 +135,36 @@ DEFAULT_PERMS_JSON="$(jq -c '[.permissions[] | select(.default_grant == true) | 
 # Determine the default role for end-users from permissions.json
 EU_DEFAULT_ROLE="$(jq -r '(.roles[] | select(.default == true) | .id) // "member"' "$PERMISSIONS_FILE")"
 
+# ─── Org Structure (end_users.org_structure) ─────────────────────────────
+# Clients declare the pattern in permissions.json. We propagate it to the
+# auth service's login_config so the event handler can read it at runtime.
+# Default "flat" = no extra orgs on signup (safe, existing behavior).
+#
+# For "workspace-per-user":
+#   1. Pre-substitute {service_id} in slug_template (handler only knows
+#      runtime vars: {email_prefix}, {short_id}, {parent_org_id}).
+#   2. If default_team_permissions not explicitly set, auto-populate from
+#      default_grant: true permissions (so the workspace team mirrors the
+#      end-users team unless the client overrides).
+ORG_STRUCTURE_PATTERN="$(jq -r '.end_users.org_structure.pattern // "flat"' "$PERMISSIONS_FILE")"
+ORG_STRUCTURE_CONFIG="$(jq -c '.end_users.org_structure.config // {}' "$PERMISSIONS_FILE")"
+
+if [ "$ORG_STRUCTURE_PATTERN" = "workspace-per-user" ]; then
+  # Pre-substitute {service_id} if the template uses it
+  HAS_SLUG_TEMPLATE="$(echo "$ORG_STRUCTURE_CONFIG" | jq 'has("slug_template")')"
+  if [ "$HAS_SLUG_TEMPLATE" = "true" ]; then
+    CURRENT_SLUG_TPL="$(echo "$ORG_STRUCTURE_CONFIG" | jq -r '.slug_template')"
+    SUBSTITUTED_SLUG_TPL="${CURRENT_SLUG_TPL//\{service_id\}/$SERVICE_ID}"
+    ORG_STRUCTURE_CONFIG="$(echo "$ORG_STRUCTURE_CONFIG" | jq --arg s "$SUBSTITUTED_SLUG_TPL" '.slug_template = $s')"
+  fi
+
+  # Inject default_team_permissions from default_grant perms unless client provided
+  HAS_TEAM_PERMS="$(echo "$ORG_STRUCTURE_CONFIG" | jq 'has("default_team_permissions")')"
+  if [ "$HAS_TEAM_PERMS" = "false" ]; then
+    ORG_STRUCTURE_CONFIG="$(echo "$ORG_STRUCTURE_CONFIG" | jq --argjson p "$DEFAULT_PERMS_JSON" '. + {default_team_permissions: $p}')"
+  fi
+fi
+
 echo -e "${CYAN}=== End-Users Org Setup (Team-Based) ===${NC}"
 echo ""
 echo "Service Org:      $SERVICE_ORG_SLUG ($SERVICE_ORG_ID)"
@@ -142,6 +172,7 @@ echo "End-Users Org:    $END_USERS_SLUG"
 echo "Default Role:     $EU_DEFAULT_ROLE"
 echo "Default Team:     $DEFAULT_TEAM_NAME"
 echo "Default Perms:    $DEFAULT_PERM_COUNT permissions (inherited via team membership)"
+echo "Org Structure:    $ORG_STRUCTURE_PATTERN"
 echo "Auth Service:     $AUTH_SERVICE_URL"
 echo "Output:           $OUTPUT_FILE"
 echo ""
@@ -153,6 +184,14 @@ if [ "$DRY_RUN" = "1" ]; then
   echo "Would assign team permissions (inherited by all members):"
   echo "$DEFAULT_PERMS" | sed 's/^/  - /'
   echo "Would configure hosted login (default_role: $EU_DEFAULT_ROLE, default_team: <team_id>)"
+  echo "Would set org_structure on login_config:"
+  echo "  pattern: $ORG_STRUCTURE_PATTERN"
+  if [ "$ORG_STRUCTURE_PATTERN" != "flat" ]; then
+    echo "  config:  $(echo "$ORG_STRUCTURE_CONFIG" | jq -c .)"
+    echo "  → Auth handler will materialize a $ORG_STRUCTURE_PATTERN structure for each new user"
+  else
+    echo "  (pattern 'flat' = no extra orgs created on signup; existing behavior preserved)"
+  fi
   echo -e "${YELLOW}=== DRY RUN COMPLETE ===${NC}"
   exit 0
 fi
@@ -341,6 +380,7 @@ PERM_RESPONSE="$(curl -s -w "\nHTTP_CODE:%{http_code}" -X POST "$AUTH_SERVICE_UR
   }')"
 
 HTTP_CODE="$(echo "$PERM_RESPONSE" | grep "HTTP_CODE" | cut -d: -f2)"
+PERM_REGISTRY_BODY="$(echo "$PERM_RESPONSE" | grep -v "HTTP_CODE")"
 
 if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
   echo -e "${GREEN}Permission schema registered on end-users org${NC}"
@@ -356,14 +396,25 @@ echo -e "${BLUE}Step 7: Configuring hosted login on end-users org${NC}"
 if [ -n "$DEFAULT_TEAM_ID" ]; then
   EU_LOGIN_CONFIG="$(jq \
     --arg team_id "$DEFAULT_TEAM_ID" \
-    '.registration.default_role = "member" | .registration.default_team = $team_id' \
+    --arg structure_pattern "$ORG_STRUCTURE_PATTERN" \
+    --argjson structure_config "$ORG_STRUCTURE_CONFIG" \
+    '.registration.default_role = "member"
+     | .registration.default_team = $team_id
+     | .registration.org_structure = {pattern: $structure_pattern, config: $structure_config}' \
     "$LOGIN_CONFIG_FILE")"
-  echo "  default_role: member"
-  echo "  default_team: $DEFAULT_TEAM_ID"
+  echo "  default_role:   member"
+  echo "  default_team:   $DEFAULT_TEAM_ID"
+  echo "  org_structure:  $ORG_STRUCTURE_PATTERN"
 else
-  EU_LOGIN_CONFIG="$(jq '.registration.default_role = "member"' "$LOGIN_CONFIG_FILE")"
-  echo "  default_role: member"
-  echo -e "  ${YELLOW}default_team: (none — team creation failed)${NC}"
+  EU_LOGIN_CONFIG="$(jq \
+    --arg structure_pattern "$ORG_STRUCTURE_PATTERN" \
+    --argjson structure_config "$ORG_STRUCTURE_CONFIG" \
+    '.registration.default_role = "member"
+     | .registration.org_structure = {pattern: $structure_pattern, config: $structure_config}' \
+    "$LOGIN_CONFIG_FILE")"
+  echo "  default_role:   member"
+  echo -e "  ${YELLOW}default_team:   (none — team creation failed)${NC}"
+  echo "  org_structure:  $ORG_STRUCTURE_PATTERN"
 fi
 
 CONFIG_RESPONSE="$(curl -s -w "\nHTTP_CODE:%{http_code}" \
@@ -373,6 +424,7 @@ CONFIG_RESPONSE="$(curl -s -w "\nHTTP_CODE:%{http_code}" \
   -d "$EU_LOGIN_CONFIG")"
 
 HTTP_CODE="$(echo "$CONFIG_RESPONSE" | grep "HTTP_CODE" | cut -d: -f2)"
+LOGIN_CONFIG_PUT_BODY="$(echo "$CONFIG_RESPONSE" | grep -v "HTTP_CODE")"
 
 if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
   echo -e "${GREEN}Hosted login configured${NC}"
@@ -395,6 +447,11 @@ fi
 echo -e "${BLUE}Step 8b: Registering OAuth client on end-users org${NC}"
 
 OAUTH_CONFIG_FILE="${OAUTH_CONFIG_FILE:-$SETUP_DIR/config/oauth-client.json}"
+# Per RFC 7592, every dynamically-registered client is managed via the
+# (registration_client_uri, registration_access_token) pair returned at
+# creation time. Persist it on POST so subsequent runs can reconcile the
+# client (e.g., update redirect_uris) using the right credentials.
+EU_OAUTH_CLIENT_FILE="$SETUP_DIR/credentials/end-users-oauth-client${ENV_SUFFIX}.json"
 EU_OAUTH_CLIENT_ID=""
 
 if [ -f "$OAUTH_CONFIG_FILE" ]; then
@@ -411,19 +468,76 @@ if [ -f "$OAUTH_CONFIG_FILE" ]; then
 
   if [ -n "$EU_OAUTH_CLIENT_ID" ] && [ "$EU_OAUTH_CLIENT_ID" != "null" ]; then
     echo -e "${GREEN}OAuth client already registered on end-users org: $EU_OAUTH_CLIENT_ID${NC}"
+
+    # Check if redirect_uris need updating (idempotent update)
+    CURRENT_URIS="$(echo "$EXISTING_EU_CLIENTS" | jq -c \
+      '.[] | select(.client_id == "'"$EU_OAUTH_CLIENT_ID"'") | .redirect_uris // []' 2>/dev/null)"
+
+    # Sort both for comparison
+    CURRENT_SORTED="$(echo "$CURRENT_URIS" | jq -c 'sort')"
+    CONFIG_SORTED="$(echo "$REDIRECT_URIS" | jq -c 'sort')"
+
+    if [ "$CURRENT_SORTED" != "$CONFIG_SORTED" ]; then
+      echo -e "${YELLOW}  Redirect URIs differ from config, updating...${NC}"
+
+      # Per RFC 7592, the management endpoint is `registration_client_uri`
+      # and authentication uses `registration_access_token` (not the org
+      # admin Bearer). Both were returned at creation; we read them from
+      # credentials/end-users-oauth-client.json (saved on POST below).
+      RAT=""; RCU=""
+      if [ -f "$EU_OAUTH_CLIENT_FILE" ]; then
+        SAVED_ID="$(jq -r '.client_id // empty' "$EU_OAUTH_CLIENT_FILE")"
+        if [ "$SAVED_ID" = "$EU_OAUTH_CLIENT_ID" ]; then
+          RAT="$(jq -r '.registration_access_token // empty' "$EU_OAUTH_CLIENT_FILE")"
+          RCU="$(jq -r '.registration_client_uri // empty' "$EU_OAUTH_CLIENT_FILE")"
+        fi
+      fi
+
+      if [ -z "$RAT" ] || [ -z "$RCU" ]; then
+        echo -e "${YELLOW}  No registration_access_token saved for $EU_OAUTH_CLIENT_ID${NC}"
+        echo -e "${YELLOW}  This client was created before token persistence was added.${NC}"
+        echo -e "${YELLOW}  Options: (a) delete the client manually and rerun this step to recreate it,${NC}"
+        echo -e "${YELLOW}           (b) register a separate client with a different client_name,${NC}"
+        echo -e "${YELLOW}           (c) leave redirect_uris as-is.${NC}"
+      else
+        UPDATE_RESPONSE="$(curl -s -w "\nHTTP_CODE:%{http_code}" \
+          -X PUT "$RCU" \
+          -H "Authorization: Bearer $RAT" \
+          -H "Content-Type: application/json" \
+          -d "$(jq -n \
+            --arg client_id "$EU_OAUTH_CLIENT_ID" \
+            --arg client_name "$CLIENT_NAME" \
+            --argjson redirect_uris "$REDIRECT_URIS" \
+            '{client_id:$client_id, client_name:$client_name, redirect_uris:$redirect_uris, grant_types:["authorization_code","refresh_token"], response_types:["code"], token_endpoint_auth_method:"none"}')")"
+
+        HTTP_CODE="$(echo "$UPDATE_RESPONSE" | grep "HTTP_CODE" | cut -d: -f2)"
+        UPDATE_BODY="$(echo "$UPDATE_RESPONSE" | grep -v "HTTP_CODE")"
+
+        if [ "$HTTP_CODE" = "200" ]; then
+          echo -e "${GREEN}  Redirect URIs updated${NC}"
+          # PUT returns the full client object — refresh our saved copy so we
+          # always have the latest metadata (registration_access_token may
+          # have rotated per RFC 7592 §3).
+          echo "$UPDATE_BODY" | jq . > "$EU_OAUTH_CLIENT_FILE"
+          chmod 600 "$EU_OAUTH_CLIENT_FILE" 2>/dev/null || true
+        else
+          echo -e "${YELLOW}  Could not update redirect_uris (HTTP $HTTP_CODE)${NC}"
+          echo "$UPDATE_BODY" | jq . 2>/dev/null || echo "$UPDATE_BODY"
+        fi
+      fi
+    else
+      echo -e "${GREEN}  Redirect URIs match config${NC}"
+    fi
   else
     REG_RESPONSE="$(curl -s -w "\nHTTP_CODE:%{http_code}" \
       -X POST "$AUTH_SERVICE_URL/auth/oauth/register" \
       -H "Authorization: Bearer $EU_TOKEN" \
       -H "Content-Type: application/json" \
-      -d '{
-        "client_name": "'"$CLIENT_NAME"'",
-        "redirect_uris": '"$REDIRECT_URIS"',
-        "grant_types": ["authorization_code", "refresh_token"],
-        "response_types": ["code"],
-        "token_endpoint_auth_method": "none",
-        "application_type": "web"
-      }')"
+      -d "$(jq -n \
+        --arg org_id "$END_USERS_ORG_ID" \
+        --arg client_name "$CLIENT_NAME" \
+        --argjson redirect_uris "$REDIRECT_URIS" \
+        '{org_id:$org_id, client_name:$client_name, redirect_uris:$redirect_uris, grant_types:["authorization_code","refresh_token"], response_types:["code"], token_endpoint_auth_method:"none", application_type:"web"}')")"
 
     HTTP_CODE="$(echo "$REG_RESPONSE" | grep "HTTP_CODE" | cut -d: -f2)"
     REG_BODY="$(echo "$REG_RESPONSE" | grep -v "HTTP_CODE")"
@@ -431,6 +545,12 @@ if [ -f "$OAUTH_CONFIG_FILE" ]; then
     if [ "$HTTP_CODE" = "200" ] || [ "$HTTP_CODE" = "201" ]; then
       EU_OAUTH_CLIENT_ID="$(echo "$REG_BODY" | jq -r '.client_id')"
       echo -e "${GREEN}OAuth client registered on end-users org: $EU_OAUTH_CLIENT_ID${NC}"
+      # Persist the full RFC 7591 response so future runs can manage this
+      # client via RFC 7592 (registration_client_uri + registration_access_token).
+      mkdir -p "$(dirname "$EU_OAUTH_CLIENT_FILE")"
+      echo "$REG_BODY" | jq . > "$EU_OAUTH_CLIENT_FILE"
+      chmod 600 "$EU_OAUTH_CLIENT_FILE" 2>/dev/null || true
+      echo -e "${GREEN}  Saved management credentials to: $EU_OAUTH_CLIENT_FILE${NC}"
     else
       echo -e "${YELLOW}OAuth client registration returned HTTP $HTTP_CODE (non-fatal)${NC}"
       echo "$REG_BODY" | jq . 2>/dev/null || echo "$REG_BODY"
@@ -442,6 +562,17 @@ fi
 
 # Step 9: Save result
 echo -e "${BLUE}Step 9: Saving result${NC}"
+
+# Preserve raw responses from every state-changing call so future runs
+# can verify what the server accepted vs what we requested. See
+# SUGGESTIONS.md for rationale.
+_safe_json() {
+  printf '%s' "${1:-}" | jq -e . >/dev/null 2>&1 && printf '%s' "$1" || printf '{}'
+}
+
+RAW_TEAM_CREATE="$(_safe_json "${TEAM_BODY:-}")"
+RAW_PERM_REGISTRY="$(_safe_json "${PERM_REGISTRY_BODY:-}")"
+RAW_LOGIN_CONFIG_PUT="$(_safe_json "${LOGIN_CONFIG_PUT_BODY:-}")"
 
 mkdir -p "$SETUP_DIR/credentials"
 
@@ -458,7 +589,12 @@ jq -n \
   --arg url "$AUTH_SERVICE_URL" \
   --arg login_url "$AUTH_SERVICE_URL/login/$END_USERS_SLUG" \
   --arg date "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+  --arg structure_pattern "$ORG_STRUCTURE_PATTERN" \
+  --argjson structure_config "$ORG_STRUCTURE_CONFIG" \
   --argjson default_permissions "$DEFAULT_PERMS_JSON" \
+  --argjson raw_team_create "$RAW_TEAM_CREATE" \
+  --argjson raw_perm_registry "$RAW_PERM_REGISTRY" \
+  --argjson raw_login_config_put "$RAW_LOGIN_CONFIG_PUT" \
   '{
     org_id: $org_id,
     org_slug: $org_slug,
@@ -472,11 +608,20 @@ jq -n \
     hosted_login_url: $login_url,
     default_permissions: $default_permissions,
     permission_model: "team-inherited",
+    org_structure: {
+      pattern: $structure_pattern,
+      config: $structure_config
+    },
     _meta: {
       auth_service_url: $url,
       created_at: $date,
       script: "04-setup-default-team.sh",
-      note: "Permissions flow through Zanzibar team membership. New users auto-join the default team on registration."
+      note: "Permissions flow through Zanzibar team membership. New users auto-join the default team on registration. If org_structure.pattern is non-flat, the auth service event handler also materializes the configured structure for each new user."
+    },
+    _raw: {
+      team_create: $raw_team_create,
+      permissions_registry_register: $raw_perm_registry,
+      login_config_put: $raw_login_config_put
     }
   }' > "$OUTPUT_FILE"
 
@@ -490,6 +635,7 @@ echo "End-Users Slug:     $END_USERS_SLUG"
 echo "Parent Org:         $SERVICE_ORG_SLUG ($SERVICE_ORG_ID)"
 echo "Default Team:       $DEFAULT_TEAM_NAME (${DEFAULT_TEAM_ID:-FAILED})"
 echo "Default Role:       member"
+echo "Org Structure:      $ORG_STRUCTURE_PATTERN"
 echo "OAuth Client:       ${EU_OAUTH_CLIENT_ID:-none}"
 echo "Hosted Login:       $AUTH_SERVICE_URL/login/$END_USERS_SLUG"
 echo "Permissions:        $DEFAULT_PERM_COUNT inherited via team membership"
@@ -507,7 +653,17 @@ echo "  3. Auth server reads login config → default_team is set"
 echo "  4. User auto-joins '$DEFAULT_TEAM_NAME' team"
 echo "  5. Zanzibar resolves: user → team membership → team permissions"
 echo "  6. User has all $DEFAULT_PERM_COUNT default_grant permissions immediately"
+if [ "$ORG_STRUCTURE_PATTERN" = "workspace-per-user" ]; then
+  echo "  7. Auth service handler creates a private workspace org for the user"
+  echo "     (parent: end-users org, owner: the new user, with its own default team)"
+fi
 echo ""
+if [ "$ORG_STRUCTURE_PATTERN" != "flat" ]; then
+  echo "Org structure: $ORG_STRUCTURE_PATTERN"
+  echo "  Each new user gets their own workspace materialized by the auth service"
+  echo "  event handler. See README's 'Org Structures' section for details."
+  echo ""
+fi
 echo "To change default permissions:"
 echo "  Update the '$DEFAULT_TEAM_NAME' team's permissions array."
 echo "  All current and future members inherit the change automatically."

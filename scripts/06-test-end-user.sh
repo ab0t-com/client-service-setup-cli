@@ -41,7 +41,7 @@ NC='\033[0m'
 
 PASS_COUNT=0
 FAIL_COUNT=0
-TOTAL_STEPS=5
+TOTAL_STEPS=5  # bumped to 6 below if org_structure.pattern is workspace-per-user
 
 mark_pass() { PASS_COUNT=$((PASS_COUNT + 1)); echo -e "  ${GREEN}PASS${NC}  $1"; }
 mark_fail() { FAIL_COUNT=$((FAIL_COUNT + 1)); echo -e "  ${RED}FAIL${NC}  $1"; }
@@ -64,6 +64,12 @@ fi
 # Load configs
 PERMISSIONS_FILE="${PERMISSIONS_FILE:-$SETUP_DIR/config/permissions.json}"
 SERVICE_ID="$(jq -r '.service.id // "integration"' "$PERMISSIONS_FILE" 2>/dev/null || echo "integration")"
+
+# Read org_structure pattern — adds Step 6 to the test plan when non-flat
+WANTED_PATTERN="$(jq -r '.end_users.org_structure.pattern // "flat"' "$PERMISSIONS_FILE" 2>/dev/null || echo "flat")"
+if [ "$WANTED_PATTERN" = "workspace-per-user" ]; then
+  TOTAL_STEPS=6
+fi
 
 # Load end-users org credentials
 EU_CREDS="$SETUP_DIR/credentials/end-users-org${ENV_SUFFIX}.json"
@@ -99,6 +105,7 @@ echo ""
 echo "End-Users Org:    $EU_ORG_SLUG ($EU_ORG_ID)"
 echo "Permission Model: $PERM_MODEL"
 echo "Default Team:     $DEFAULT_TEAM_NAME (${DEFAULT_TEAM_ID:-none})"
+echo "Org Structure:    $WANTED_PATTERN"
 echo "Test User:        $TEST_EMAIL"
 echo "Auth Service:     $AUTH_SERVICE_URL"
 echo ""
@@ -247,6 +254,47 @@ if [ -n "${USER_TOKEN:-}" ]; then
   fi
 else
   mark_fail "Cannot verify — registration failed in Step 1"
+fi
+
+# ── Step 6: Verify workspace materialized (only when workspace-per-user) ──
+# The auth service runs an in-process event handler that subscribes to
+# auth.user.registered and creates a private nested org for the user
+# when login_config.registration.org_structure.pattern is workspace-per-user.
+# This step asserts that handler actually ran and produced the workspace.
+#
+# Skipped silently for pattern flat — no workspace expected.
+if [ "$WANTED_PATTERN" = "workspace-per-user" ]; then
+  echo -e "${BLUE}Step 6: Verify workspace materialized for user${NC}"
+
+  if [ -z "${USER_TOKEN:-}" ]; then
+    mark_fail "Cannot verify — registration failed in Step 1"
+  elif [ -z "${USER_ID:-}" ]; then
+    mark_fail "Cannot verify — no USER_ID extracted from registration response"
+  else
+    # Brief wait for handler to complete (it runs async after the registration event fires)
+    sleep 2
+
+    # Query the end-users org hierarchy (user has org.read via member role on the parent)
+    HIERARCHY="$(curl -s --max-time 5 \
+      "$AUTH_SERVICE_URL/organizations/$EU_ORG_ID/hierarchy" \
+      -H "Authorization: Bearer $USER_TOKEN" 2>/dev/null || echo "{}")"
+
+    # Find a child where settings tags this as a user_workspace owned by our test user
+    WORKSPACE_ID="$(echo "$HIERARCHY" | jq -r --arg uid "$USER_ID" \
+      '[.children[]?, .child_organizations[]? | select(.settings.type == "user_workspace" and .settings.owner_user_id == $uid)] | .[0].id // empty' \
+      2>/dev/null)"
+
+    if [ -n "$WORKSPACE_ID" ] && [ "$WORKSPACE_ID" != "null" ]; then
+      WORKSPACE_SLUG="$(echo "$HIERARCHY" | jq -r --arg id "$WORKSPACE_ID" \
+        '[.children[]?, .child_organizations[]? | select(.id == $id)] | .[0].slug // empty' 2>/dev/null)"
+      mark_pass "Workspace materialized: ${WORKSPACE_SLUG:-(slug unknown)} ($WORKSPACE_ID)"
+    else
+      mark_fail "Workspace NOT materialized for $USER_ID — auth handler may have failed"
+      echo -e "  ${YELLOW}→ Check auth service logs for 'workspace_handler_failed' on user_id=$USER_ID${NC}"
+      echo -e "  ${YELLOW}→ Run './setup verify' to confirm org_structure pattern is in login_config${NC}"
+      echo -e "  ${YELLOW}→ Confirm appv2/event_handlers/workspace_provisioning.py registered at startup${NC}"
+    fi
+  fi
 fi
 
 # ── Summary ──

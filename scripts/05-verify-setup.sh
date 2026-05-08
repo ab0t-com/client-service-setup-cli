@@ -272,6 +272,48 @@ else
   warn "No credentials available, skipping live checks"
 fi
 
+# ── Section 7: Org Structure ──
+# Verify that the org_structure pattern declared in permissions.json was
+# actually written to the end-users org's login_config. Catches the
+# "silent disable via typo" failure mode where someone edited
+# permissions.json but forgot to re-run script 04.
+#
+# Skipped for pattern "flat" (the safe default — no verification noise
+# for clients who didn't opt in to org structures).
+echo ""
+echo -e "${BLUE}Org Structure${NC}"
+
+DESIRED_PATTERN="$(jq -r '.end_users.org_structure.pattern // "flat"' "$PERMISSIONS_FILE" 2>/dev/null || echo "flat")"
+
+if [ "$DESIRED_PATTERN" = "flat" ]; then
+  pass "Pattern: flat (no extra orgs created on signup — existing behavior)"
+elif [ -z "${TOKEN:-}" ]; then
+  warn "Org structure '$DESIRED_PATTERN' configured but admin token unavailable, skipping live verification"
+elif [ -z "${EU_ORG_ID:-}" ]; then
+  warn "Org structure '$DESIRED_PATTERN' configured but end-users org ID not found in credentials, skipping live verification"
+else
+  # Fetch the live login_config (authenticated — needed because org_structure
+  # lives under .registration which is excluded from /login-config/public).
+  LIVE_CONFIG="$(curl -s --max-time 5 \
+    "$AUTH_SERVICE_URL/organizations/$EU_ORG_ID/login-config" \
+    -H "Authorization: Bearer $TOKEN" 2>/dev/null || echo "{}")"
+
+  LIVE_PATTERN="$(echo "$LIVE_CONFIG" | jq -r '.registration.org_structure.pattern // "flat"' 2>/dev/null || echo "flat")"
+
+  if [ "$LIVE_PATTERN" = "$DESIRED_PATTERN" ]; then
+    pass "Pattern: $DESIRED_PATTERN (configured in permissions.json AND live in login_config)"
+
+    # If non-flat, also surface the config block for visibility
+    if [ "$DESIRED_PATTERN" != "flat" ]; then
+      LIVE_CONFIG_BLOCK="$(echo "$LIVE_CONFIG" | jq -c '.registration.org_structure.config' 2>/dev/null || echo "{}")"
+      pass "Config: $LIVE_CONFIG_BLOCK"
+    fi
+  else
+    fail "Org structure mismatch: permissions.json wants '$DESIRED_PATTERN' but login_config has '$LIVE_PATTERN'"
+    echo -e "  ${YELLOW}→ Run './setup run 04' to re-apply the configured org_structure${NC}"
+  fi
+fi
+
 # ── Summary ──
 echo ""
 echo -e "${CYAN}=== Verification Summary ===${NC}"
