@@ -48,6 +48,26 @@
 #   ./scripts/04.1-setup-default-team.sh
 #   AUTH_SERVICE_URL=https://auth.dev.ab0t.com ./scripts/04.1-setup-default-team.sh
 #   DRY_RUN=1 ./scripts/04.1-setup-default-team.sh
+#   SYNC_EXISTING=1 ./scripts/04.1-setup-default-team.sh    # sync perms even when team exists
+#
+# SYNC_EXISTING flag (added 2026-06-10):
+#   By default this script SKIPS team mutation when the default team already
+#   exists. That keeps re-runs cheap, but it means perms drift accumulates:
+#   when the registry adds a NEW default_grant permission, existing teams
+#   don't get it on re-run, so members never gain the perm.
+#
+#   With SYNC_EXISTING=1, an existing team's permissions get PUT-updated to
+#   the UNION of (existing ∪ canonical default_grant set). Additive only —
+#   we never remove a custom perm an operator added by hand.
+#
+#   SCOPE: this syncs the SHARED end-users team only (flat / self-service
+#   archetypes). It does NOT reach the per-user workspace teams created by
+#   org_structure.pattern = "workspace-per-user" — permission checks in a
+#   user's workspace are scoped to THAT org and never see this team. For
+#   existing workspaces use:
+#       ./scripts/09-backfill-workspace-permissions.sh
+#   (Re-running this script DOES refresh the workspace template in
+#   login_config, so FUTURE workspaces are covered either way.)
 
 set -euo pipefail
 
@@ -55,6 +75,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SETUP_DIR="${SETUP_DIR:-$(cd "$SCRIPT_DIR/.." && pwd)}"
 AUTH_SERVICE_URL="${AUTH_SERVICE_URL:-https://auth.service.ab0t.com}"
 DRY_RUN="${DRY_RUN:-0}"
+SYNC_EXISTING="${SYNC_EXISTING:-0}"
 
 # Colors
 RED='\033[0;31m'
@@ -336,6 +357,45 @@ FOUND_TEAM="$(echo "$EXISTING_TEAMS" | jq -r '.[] | select(.name=="'"$DEFAULT_TE
 if [ -n "$FOUND_TEAM" ] && [ "$FOUND_TEAM" != "null" ]; then
   DEFAULT_TEAM_ID="$FOUND_TEAM"
   echo -e "${GREEN}Default team already exists: $DEFAULT_TEAM_ID${NC}"
+
+  # When SYNC_EXISTING=1, bring the existing team's permissions up to date
+  # with the current registry's default_grant set. Computes the UNION so
+  # operator-added custom perms are preserved. No-op when nothing's new.
+  if [ "$SYNC_EXISTING" = "1" ]; then
+    EXISTING_PERMS="$(echo "$EXISTING_TEAMS" \
+      | jq -c '.[] | select(.name=="'"$DEFAULT_TEAM_NAME"'") | .permissions // []' 2>/dev/null | head -n1)"
+    # Guard: a shape surprise can yield an empty string, and `--argjson cur ""`
+    # is a jq error that kills the run under `set -euo pipefail`.
+    EXISTING_PERMS="${EXISTING_PERMS:-[]}"
+    TARGET_PERMS="$(jq -c --argjson cur "$EXISTING_PERMS" --argjson new "$DEFAULT_PERMS_JSON" \
+      -n '$cur + $new | unique')"
+    # Set difference (not length subtraction): dup-safe, and tells the
+    # operator exactly WHICH perms are being added.
+    MISSING_PERMS="$(jq -cn --argjson cur "$EXISTING_PERMS" --argjson tgt "$TARGET_PERMS" \
+      '$tgt - $cur')"
+    ADDED_COUNT="$(echo "$MISSING_PERMS" | jq 'length')"
+
+    if [ "$ADDED_COUNT" -gt 0 ]; then
+      echo -e "${CYAN}  SYNC_EXISTING=1: adding $ADDED_COUNT new default_grant perm(s) to existing team${NC}"
+      echo -e "${CYAN}    $(echo "$MISSING_PERMS" | jq -cr '.')${NC}"
+      SYNC_RESPONSE="$(curl -s -w "\nHTTP_CODE:%{http_code}" \
+        -X PUT "$AUTH_SERVICE_URL/teams/$DEFAULT_TEAM_ID" \
+        -H "Authorization: Bearer $EU_TOKEN" \
+        -H "Content-Type: application/json" \
+        -d "{\"permissions\": $TARGET_PERMS}")"
+      SYNC_HTTP_CODE="$(echo "$SYNC_RESPONSE" | grep "HTTP_CODE" | cut -d: -f2)"
+      SYNC_BODY="$(echo "$SYNC_RESPONSE" | grep -v "HTTP_CODE")"
+      if [ "$SYNC_HTTP_CODE" = "200" ] || [ "$SYNC_HTTP_CODE" = "201" ]; then
+        echo -e "${GREEN}  Synced existing team permissions ($ADDED_COUNT new added)${NC}"
+        echo -e "${GREEN}  Members see the change within ~5 min (permission cache TTL); a fresh login applies immediately.${NC}"
+      else
+        echo -e "${YELLOW}  Sync PUT returned HTTP $SYNC_HTTP_CODE — continuing${NC}"
+        echo "$SYNC_BODY" | jq . 2>/dev/null || echo "$SYNC_BODY"
+      fi
+    else
+      echo -e "${GREEN}  SYNC_EXISTING=1: team already carries all canonical perms (no-op)${NC}"
+    fi
+  fi
 else
   TEAM_RESPONSE="$(curl -s -w "\nHTTP_CODE:%{http_code}" \
     -X POST "$AUTH_SERVICE_URL/organizations/$END_USERS_ORG_ID/teams" \
